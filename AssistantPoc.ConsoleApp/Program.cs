@@ -4,17 +4,31 @@ using AssistantPoc.Core;
 using OpenAI.Assistants;
 using OpenAI.Files;
 
+var assistantHelper = new AssistantHelper();
+assistantHelper.SetEndpointEnv("https://assistant-poc.openai.azure.com/");
+assistantHelper.SetInstructionsPathEnv("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Documents/Instructions.md");
+assistantHelper.SetKnowledgeBasePathEnv("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Documents/KnowledgeBase");
+assistantHelper.SetTimeSeriesPathEnv("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Documents/Responses/GetTimeSeries.json");
+assistantHelper.SetAssistantIdEnv("asst_zkPe79PBfWnVSsnT0dEzgwVA");
+
+var apiKey = File.ReadAllText("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Local/key.txt");
+assistantHelper.SetApiKeyEnv(apiKey);
+
+assistantHelper.InitClient();
+
 // await Sample1();
-await CreateAhiAssistant();
+// await CreateAhiAssistant(assistantHelper);
+await RunThread(assistantHelper);
 
-async static Task CreateAhiAssistant()
+async static Task RunThread(AssistantHelper assistantHelper)
 {
-    var assistantHelper = new AssistantHelper();
-    assistantHelper.SetEndpointEnv("https://assistant-poc.openai.azure.com/");
-    assistantHelper.SetInstructionsPathEnv("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Documents/Instructions.md");
-    assistantHelper.SetKnowledgeBasePathEnv("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Documents/KnowledgeBase");
-    assistantHelper.InitClient();
+    ArgumentNullException.ThrowIfNull(assistantHelper.Client);
+    AssistantClient assistantClient = assistantHelper.Client.GetAssistantClient();
+    await assistantHelper.RunThread(assistantClient);
+}
 
+async static Task CreateAhiAssistant(AssistantHelper assistantHelper)
+{
     await assistantHelper.CreateAhiAssistant();
 }
 

@@ -1,11 +1,11 @@
 using System.ClientModel;
 using System.Diagnostics.CodeAnalysis;
+using AssistantPoc.Core.Models;
 using Azure;
 using Azure.AI.OpenAI;
-using OpenAI;
+using Newtonsoft.Json;
 using OpenAI.Assistants;
 using OpenAI.Files;
-using OpenAI.VectorStores;
 
 namespace AssistantPoc.Core;
 
@@ -39,9 +39,184 @@ public class AssistantHelper
         Environment.SetEnvironmentVariable("KNOWLEDGE_BASE_PATH", path);
     }
 
+    public void SetAssistantIdEnv(string assistantId)
+    {
+        Environment.SetEnvironmentVariable("ASSISTANT_ID", assistantId);
+    }
+
     public void SetInstructionsPathEnv(string path)
     {
         Environment.SetEnvironmentVariable("INSTRUCTIONS_PATH", path);
+    }
+
+    public void SetTimeSeriesPathEnv(string path)
+    {
+        Environment.SetEnvironmentVariable("TIMESERIES_PATH", path);
+    }
+
+    public async Task RunThread(AssistantClient assistantClient, string? assistantId = null)
+    {
+        assistantId ??= Environment.GetEnvironmentVariable("ASSISTANT_ID")
+            ?? throw new ArgumentNullException("ASSISTANT_ID");
+
+        // Create and run a thread with a user query about the data already associated with the assistant
+        ThreadCreationOptions threadOptions = new() { };
+        ClientResult<AssistantThread> threadResult = await assistantClient.CreateThreadAsync(threadOptions);
+        bool hasPrompt = true;
+
+        while (hasPrompt)
+        {
+            AsyncCollectionResult<StreamingUpdate>? streamingResult = assistantClient.CreateRunStreamingAsync(threadResult.Value.Id,
+                assistantId, options: new RunCreationOptions
+                {
+                    // AdditionalInstructions = "",
+                    // AdditionalMessages = { }
+                });
+
+            do
+            {
+                streamingResult = await ReadStreamingResult(assistantClient, threadResult.Value.Id, streamingResult);
+            } while (streamingResult is not null);
+
+            hasPrompt = await Prompt(threadResult.Value, assistantClient);
+        }
+
+        await assistantClient.DeleteThreadAsync(threadResult.Value.Id);
+    }
+
+    public async Task<AsyncCollectionResult<StreamingUpdate>?> ReadStreamingResult(
+        AssistantClient assistantClient,
+        string threadId, AsyncCollectionResult<StreamingUpdate> streamingResult)
+    {
+        await foreach (StreamingUpdate streamingUpdate in streamingResult)
+        {
+            if (streamingUpdate.UpdateKind == StreamingUpdateReason.MessageCreated
+                && streamingUpdate is MessageStatusUpdate messageStatusUpdate)
+            {
+                if (messageStatusUpdate.Value.Role == MessageRole.Assistant)
+                {
+                    Console.Write("[Assistant] ");
+                }
+            }
+            else if (streamingUpdate is MessageContentUpdate contentUpdate)
+            {
+                Console.Write(contentUpdate.Text);
+            }
+            else if (streamingUpdate.UpdateKind == StreamingUpdateReason.RunFailed && streamingUpdate is RunUpdate runUpdate)
+            {
+                if (runUpdate.Value.LastError is not null)
+                {
+                    Console.WriteLine($"[Assistant] [{runUpdate.Value.LastError.Code}] {runUpdate.Value.LastError.Message}");
+                }
+            }
+            else if (streamingUpdate is RequiredActionUpdate actionUpdate)
+            {
+                string responseJson = "{}";
+                switch (actionUpdate.FunctionName)
+                {
+                    case nameof(NavigateToAsset):
+                        {
+                            var command = JsonConvert.DeserializeObject<NavigateToAssetCommand>(actionUpdate.FunctionArguments);
+                            var response = await NavigateToAsset(command ?? throw new ArgumentNullException(nameof(command)));
+                            responseJson = JsonConvert.SerializeObject(response);
+                            break;
+                        }
+                    case nameof(GetTimeSeries):
+                        {
+                            var command = JsonConvert.DeserializeObject<GetTimeSeriesCommand>(actionUpdate.FunctionArguments);
+                            var response = await GetTimeSeries(command ?? throw new ArgumentNullException(nameof(command)));
+                            responseJson = JsonConvert.SerializeObject(response);
+                            break;
+                        }
+                }
+
+                var submitResult = assistantClient.SubmitToolOutputsToRunStreamingAsync(
+                    threadId: threadId,
+                    runId: actionUpdate.Value.Id,
+                    toolOutputs: [new ToolOutput(actionUpdate.ToolCallId, responseJson)]);
+
+                return submitResult;
+            }
+            else
+            {
+                // Console.WriteLine(streamingUpdate.UpdateKind);
+            }
+        }
+
+        return null;
+    }
+
+    public async Task<NavigateToAssetResponse> NavigateToAsset(NavigateToAssetCommand command)
+    {
+        await Task.CompletedTask;
+        AssetEntity? assetEntity = null;
+        if (command.AssetId is not null && Guid.TryParse(command.AssetId, out var assetId))
+        {
+            assetEntity = DataStore.Assets.FirstOrDefault(a => a.Id == assetId);
+        }
+        else if (!string.IsNullOrWhiteSpace(command.AssetName))
+        {
+            assetEntity = DataStore.Assets.FirstOrDefault(a => string.Equals(a.Name, command.AssetName, StringComparison.OrdinalIgnoreCase));
+        }
+        return new NavigateToAssetResponse
+        {
+            AssetId = assetEntity?.Id,
+            Found = assetEntity is not null
+        };
+    }
+
+    public async Task<GetTimeSeriesResponse> GetTimeSeries(GetTimeSeriesCommand command)
+    {
+        await Task.CompletedTask;
+        AssetEntity? assetEntity = null;
+        if (command.AssetId is not null && Guid.TryParse(command.AssetId, out var assetId))
+        {
+            assetEntity = DataStore.Assets.FirstOrDefault(a => a.Id == assetId);
+        }
+        else if (!string.IsNullOrWhiteSpace(command.AssetName))
+        {
+            assetEntity = DataStore.Assets.FirstOrDefault(a => string.Equals(a.Name, command.AssetName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var response = new GetTimeSeriesResponse
+        {
+            AssetId = assetEntity?.Id,
+            Found = assetEntity is not null
+        };
+
+        if (response.Found)
+        {
+            var sampleResponseJson = File.ReadAllText(Environment.GetEnvironmentVariable("TIMESERIES_PATH") ?? throw new ArgumentNullException());
+            var sampleResponse = JsonConvert.DeserializeObject<GetTimeSeriesResponse>(sampleResponseJson);
+            response.Series = sampleResponse?.Series;
+        }
+
+        return response;
+    }
+
+    public async Task<bool> Prompt(AssistantThread thread, AssistantClient assistantClient)
+    {
+        Console.WriteLine();
+        Console.Write("[User] ");
+        string? prompt = Console.ReadLine();
+        if (string.IsNullOrEmpty(prompt))
+            return false;
+
+        await assistantClient.CreateMessageAsync(thread.Id, MessageRole.User,
+            content: [MessageContent.FromText(prompt)], options: new MessageCreationOptions
+            {
+                Attachments = []
+            });
+        return true;
+    }
+
+    public string AppendPromptMetadata(string prompt)
+    {
+        return $"""
+        {prompt}
+        ---
+        Current time: {DateTime.UtcNow:o}
+        """;
     }
 
     public async Task CreateAhiAssistant()
