@@ -4,7 +4,19 @@ using AssistantPoc.Core;
 using OpenAI.Assistants;
 using OpenAI.Files;
 
-await Sample1();
+// await Sample1();
+await CreateAhiAssistant();
+
+async static Task CreateAhiAssistant()
+{
+    var assistantHelper = new AssistantHelper();
+    assistantHelper.SetEndpointEnv("https://assistant-poc.openai.azure.com/");
+    assistantHelper.SetInstructionsPathEnv("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Documents/Instructions.md");
+    assistantHelper.SetKnowledgeBasePathEnv("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Documents/KnowledgeBase");
+    assistantHelper.InitClient();
+
+    await assistantHelper.CreateAhiAssistant();
+}
 
 async static Task Sample1()
 {
@@ -74,7 +86,7 @@ async static Task Sample1()
             }
             }
         },
-        Temperature = 0.01f,
+        Temperature = 0.5f,
         // ResponseFormat = AssistantResponseFormat.JsonObject
         ResponseFormat = AssistantResponseFormat.Auto
     };
