@@ -2,6 +2,7 @@ import React from 'react';
 import { Layout } from 'antd';
 import { Outlet } from 'react-router-dom';
 import Sider from './Sider';
+import ChatPopup from '../ChatPopup';
 
 const { Content } = Layout;
 
@@ -14,6 +15,7 @@ const MainLayout: React.FC = () => {
           <Outlet />
         </Content>
       </Layout>
+      <ChatPopup />
     </Layout>
   );
 };
