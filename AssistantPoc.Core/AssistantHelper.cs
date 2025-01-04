@@ -88,6 +88,7 @@ public class AssistantHelper
         AssistantClient assistantClient,
         string threadId, AsyncCollectionResult<StreamingUpdate> streamingResult)
     {
+        ArgumentNullException.ThrowIfNull(Client);
         await foreach (StreamingUpdate streamingUpdate in streamingResult)
         {
             if (streamingUpdate.UpdateKind == StreamingUpdateReason.MessageCreated
@@ -100,7 +101,17 @@ public class AssistantHelper
             }
             else if (streamingUpdate is MessageContentUpdate contentUpdate)
             {
-                Console.Write(contentUpdate.Text);
+                if (contentUpdate.ImageFileId is not null)
+                {
+                    ClientResult<BinaryData> imageData = await Client.GetOpenAIFileClient().DownloadFileAsync(contentUpdate.ImageFileId);
+                    // Save image to a file or display it
+                    string fileName = $"image_{DateTime.Now:yyyyMMddHHmmss}.png";
+                    await File.WriteAllBytesAsync(Path.Combine("/Users/trungtran/MyPlace/Yokogawa/Projects/ahi-apps/Projects/open-ai-assistant/Local", fileName), imageData.Value);
+                }
+                else
+                {
+                    Console.Write(contentUpdate.Text);
+                }
             }
             else if (streamingUpdate.UpdateKind == StreamingUpdateReason.RunFailed && streamingUpdate is RunUpdate runUpdate)
             {
@@ -202,6 +213,8 @@ public class AssistantHelper
         if (string.IsNullOrEmpty(prompt))
             return false;
 
+        prompt = AppendPromptMetadata(prompt);
+
         await assistantClient.CreateMessageAsync(thread.Id, MessageRole.User,
             content: [MessageContent.FromText(prompt)], options: new MessageCreationOptions
             {
@@ -275,6 +288,7 @@ public class AssistantHelper
             ResponseFormat = AssistantResponseFormat.Auto
         };
         assistantOptions.Tools.Add(new FileSearchToolDefinition());
+        assistantOptions.Tools.Add(new CodeInterpreterToolDefinition());
 
         assistantOptions.Tools.Add(new FunctionToolDefinition("NavigateToAsset")
         {
