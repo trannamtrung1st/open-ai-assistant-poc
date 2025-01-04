@@ -11,10 +11,12 @@ import {
 } from '@ant-design/icons';
 import { chatService } from '../services/chatService';
 import { Message } from '../types/chat';
+import { useNavigate } from 'react-router-dom';
 
 const { Text } = Typography;
 
 export default function ChatPopup() {
+  const navigate = useNavigate();
   const [isOpen, setIsOpen] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const [messages, setMessages] = useState<Message[]>([
@@ -28,6 +30,7 @@ export default function ChatPopup() {
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [sessionId, setSessionId] = useState<string>();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -40,7 +43,6 @@ export default function ChatPopup() {
   const handleSendMessage = async () => {
     if (!inputValue.trim() || isLoading) return;
 
-    // Add user message
     const userMessage: Message = {
       id: Date.now().toString(),
       content: inputValue.trim(),
@@ -54,22 +56,20 @@ export default function ChatPopup() {
     setIsTyping(true);
 
     try {
-      // Send message to API and wait for response
-      const response = await chatService.sendMessage(userMessage.content);
+      const response = await chatService.sendMessage(userMessage.content, sessionId);
+      setSessionId(response.sessionId);
 
-      // Add AI response
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
         content: response.content,
         isUser: false,
-        timestamp: new Date(),
-        error: !!response.error
+        timestamp: new Date()
       };
 
       setMessages(prev => [...prev, aiMessage]);
-
-      if (response.error) {
-        message.error('Failed to get response from AI');
+      
+      if (response.navigateToAsset?.found) {
+        navigate(`/assets/${response.navigateToAsset.assetId}`);
       }
     } catch (error) {
       console.error('Error sending message:', error);
@@ -175,11 +175,13 @@ export default function ChatPopup() {
                       padding: '8px 12px',
                       borderRadius: 8,
                       maxWidth: '75%',
-                      wordBreak: 'break-word'
+                      wordBreak: 'break-word',
+                      whiteSpace: 'pre-wrap'
                     }}>
                       <Text style={{ 
                         color: message.isUser ? '#fff' : 'inherit',
-                        fontSize: 13
+                        fontSize: 13,
+                        whiteSpace: 'pre-wrap'
                       }}>
                         {message.content}
                       </Text>

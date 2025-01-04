@@ -1,3 +1,4 @@
+using AssistantPoc.Core.Models;
 using OpenAI.Assistants;
 
 namespace AssistantPoc.Core.Interfaces;
@@ -5,7 +6,12 @@ namespace AssistantPoc.Core.Interfaces;
 public interface IAssistantService
 {
     Task CreateAssistant();
-    Task RunThread(string? assistantId = null);
-    Task<bool> Prompt(AssistantThread thread);
-    string AppendPromptMetadata(string prompt);
+    Task RunConsoleThread(string? assistantId = null);
+    Task<(string Content, NavigateToAssetResponse? NavigateCommand)> RunThreadOnce(
+        AssistantThread thread, 
+        string? assistantId,
+        Func<Action<string>> onMessageCreated);
+    Task AddPrompt(AssistantThread thread, string message);
+    Task<AssistantThread> GetOrCreateThread(string? sessionId = null);
+    void RemoveThread(string sessionId);
 }

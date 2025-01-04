@@ -19,4 +19,4 @@ var host = builder.Build();
 
 var assistantService = host.Services.GetRequiredService<IAssistantService>();
 // await assistantService.CreateAssistant();
-await assistantService.RunThread();
+await assistantService.RunConsoleThread();

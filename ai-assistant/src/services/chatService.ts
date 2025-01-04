@@ -1,37 +1,50 @@
 import { API_CONFIG } from '../config/api';
 import { Message } from '../types/chat';
 
-interface ChatResponse {
+interface ChatApiRequest {
+  message: string;
+  sessionId?: string;
+}
+
+interface ChatApiResponse {
   content: string;
-  error?: string;
+  sessionId: string;
+  navigateToAsset?: {
+    assetId: string;
+    found: boolean;
+  };
+}
+
+interface ErrorResponse {
+  error: string;
 }
 
 export const chatService = {
-  sendMessage: async (message: string): Promise<ChatResponse> => {
+  sendMessage: async (message: string, sessionId?: string): Promise<ChatApiResponse> => {
     try {
       const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chat}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Accept': 'application/json'
         },
         body: JSON.stringify({
           message,
-          timestamp: new Date().toISOString()
-        }),
+          sessionId
+        } as ChatRequest),
       });
 
+      const data = await response.json();
+      
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorMessage = (data as ErrorResponse).error || `HTTP error! status: ${response.status}`;
+        throw new Error(errorMessage);
       }
 
-      const data = await response.json();
-      return { content: data.content };
+      return data as ChatApiResponse;
     } catch (error) {
       console.error('Chat API Error:', error);
-      return {
-        content: "I apologize, but I'm having trouble processing your request right now.",
-        error: error instanceof Error ? error.message : 'Unknown error'
-      };
+      throw error instanceof Error ? error : new Error('Failed to send message');
     }
   }
 }; 

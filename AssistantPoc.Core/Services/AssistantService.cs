@@ -11,6 +11,8 @@ using AssistantPoc.Core.Models;
 using OpenAI.Files;
 using OpenAI.VectorStores;
 using Microsoft.Extensions.Options;
+using System.Text;
+using System.Threading;
 
 namespace AssistantPoc.Core.Services;
 
@@ -22,6 +24,9 @@ public class AssistantService : IAssistantService
     private readonly OpenAIFileClient _fileClient;
     private readonly IFileService _fileService;
     private readonly AssistantConfiguration _config;
+    private readonly Dictionary<string, AssistantThread> _threads = new();
+    private readonly SemaphoreSlim _lock = new(1, 1);
+    private NavigateToAssetResponse? _lastNavigationCommand;
 
     public AssistantService(
         AzureOpenAIClient client,
@@ -123,32 +128,50 @@ public class AssistantService : IAssistantService
         };
     }
 
-    public async Task RunThread(string? assistantId = null)
+    public async Task RunConsoleThread(string? assistantId = null)
     {
         assistantId ??= _config.AssistantId;
-
-        var threadResult = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions());
+        var thread = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions());
         bool hasPrompt = true;
 
         while (hasPrompt)
         {
-            var streamingResult = _assistantClient.CreateRunStreamingAsync(
-                threadResult.Value.Id,
-                assistantId,
-                new RunCreationOptions());
-
-            do
+            var response = await RunThreadOnce(thread.Value, assistantId, () =>
             {
-                streamingResult = await ReadStreamingResult(threadResult.Value, streamingResult);
-            } while (streamingResult is not null);
+                Console.Write("[Assistant] ");
+                return (content) => Console.Write(content);
+            });
 
-            hasPrompt = await Prompt(threadResult.Value);
+            hasPrompt = await GetConsolePrompt(thread.Value);
         }
 
-        await _assistantClient.DeleteThreadAsync(threadResult.Value.Id);
+        await _assistantClient.DeleteThreadAsync(thread.Value.Id);
     }
 
-    public async Task<bool> Prompt(AssistantThread thread)
+    public async Task<(string Content, NavigateToAssetResponse? NavigateCommand)> RunThreadOnce(
+        AssistantThread thread, 
+        string? assistantId,
+        Func<Action<string>> onMessageCreated)
+    {
+        _lastNavigationCommand = null;
+        assistantId ??= _config.AssistantId;
+        var responseBuilder = new StringBuilder();
+
+        var streamingResult = _assistantClient.CreateRunStreamingAsync(
+            thread.Id,
+            assistantId,
+            new RunCreationOptions());
+
+        do
+        {
+            streamingResult = await ReadStreamingResult(thread, streamingResult, onMessageCreated,
+                content => responseBuilder.Append(content));
+        } while (streamingResult is not null);
+
+        return (responseBuilder.ToString(), _lastNavigationCommand);
+    }
+
+    private async Task<bool> GetConsolePrompt(AssistantThread thread)
     {
         Console.WriteLine();
         Console.Write("[User] ");
@@ -156,65 +179,52 @@ public class AssistantService : IAssistantService
         if (string.IsNullOrEmpty(prompt))
             return false;
 
-        prompt = AppendPromptMetadata(prompt);
-        await _assistantClient.CreateMessageAsync(thread.Id, MessageRole.User,
-            content: [MessageContent.FromText(prompt)]);
+        await AddPrompt(thread, prompt);
         return true;
     }
 
-    public string AppendPromptMetadata(string prompt) =>
-        $"{prompt}\n---\nCurrent time: {DateTime.UtcNow:o}";
+    public async Task AddPrompt(AssistantThread thread, string message)
+    {
+        var prompt = AppendPromptMetadata(message);
+        await _assistantClient.CreateMessageAsync(thread.Id, MessageRole.User,
+            content: [MessageContent.FromText(prompt)]);
+    }
 
     private async Task<AsyncCollectionResult<StreamingUpdate>?> ReadStreamingResult(
         AssistantThread thread,
-        AsyncCollectionResult<StreamingUpdate> streamingResult)
+        AsyncCollectionResult<StreamingUpdate> streamingResult,
+        Func<Action<string>> onMessageCreated,
+        Action<string> onContent)
     {
-        ArgumentNullException.ThrowIfNull(_client);
-
         await foreach (StreamingUpdate update in streamingResult)
         {
             switch (update)
             {
-                case MessageStatusUpdate messageUpdate when update.UpdateKind == StreamingUpdateReason.MessageCreated:
+                case MessageStatusUpdate messageUpdate when
+                    update.UpdateKind == StreamingUpdateReason.MessageCreated:
                     if (messageUpdate.Value.Role == MessageRole.Assistant)
                     {
-                        Console.Write("[Assistant] ");
+                        var content = messageUpdate.Value.Content
+                            .Select(c => c.ImageFileId is null ? c.Text : $"[Image: {c.ImageUri}]")
+                            .Where(c => !string.IsNullOrEmpty(c));
+                        onMessageCreated()?.Invoke(string.Join("", content));
                     }
                     break;
 
                 case MessageContentUpdate contentUpdate:
-                    await HandleContentUpdate(contentUpdate);
+                    onContent(contentUpdate.Text);
                     break;
 
                 case RunUpdate runUpdate when update.UpdateKind == StreamingUpdateReason.RunFailed:
-                    HandleRunError(runUpdate);
-                    break;
+                    var errorMessage = $"[Error] {runUpdate.Value.LastError?.Message ?? "Unknown error"}";
+                    onContent(errorMessage);
+                    return null;
 
                 case RequiredActionUpdate actionUpdate:
                     return await HandleActionUpdate(thread, actionUpdate);
             }
         }
         return null;
-    }
-
-    private async Task HandleContentUpdate(MessageContentUpdate contentUpdate)
-    {
-        if (contentUpdate.ImageFileId is not null)
-        {
-            await HandleImageContent(contentUpdate.ImageFileId);
-        }
-        else
-        {
-            Console.Write(contentUpdate.Text);
-        }
-    }
-
-    private async Task HandleImageContent(string imageFileId)
-    {
-        var imageData = await _fileClient.DownloadFileAsync(imageFileId);
-        string fileName = $"image_{DateTime.Now:yyyyMMddHHmmss}.png";
-        string path = Path.Combine(_config.ImageOutputPath ?? "Local", fileName);
-        await File.WriteAllBytesAsync(path, imageData.Value);
     }
 
     private void HandleRunError(RunUpdate runUpdate)
@@ -271,13 +281,16 @@ public class AssistantService : IAssistantService
         }
         else if (!string.IsNullOrWhiteSpace(command.AssetName))
         {
-            assetEntity = DataStore.Assets.FirstOrDefault(a => string.Equals(a.Name, command.AssetName, StringComparison.OrdinalIgnoreCase));
+            assetEntity = DataStore.Assets.FirstOrDefault(a => 
+                string.Equals(a.Name, command.AssetName, StringComparison.OrdinalIgnoreCase));
         }
-        return new NavigateToAssetResponse
+        var response = new NavigateToAssetResponse
         {
             AssetId = assetEntity?.Id,
             Found = assetEntity is not null
         };
+        _lastNavigationCommand = response;
+        return response;
     }
 
     private async Task<GetTimeSeriesResponse> GetTimeSeries(AssistantThread thread, GetTimeSeriesCommand command)
@@ -390,6 +403,36 @@ public class AssistantService : IAssistantService
             vectorStoreId,
             fileId: newFileId,
             waitUntilCompleted: true);
+    }
+
+    private string AppendPromptMetadata(string prompt) =>
+        $"{prompt}\n---\nCurrent time: {DateTime.UtcNow:o}";
+
+    public async Task<AssistantThread> GetOrCreateThread(string? sessionId = null)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            sessionId ??= Guid.NewGuid().ToString();
+            
+            if (!_threads.TryGetValue(sessionId, out var thread))
+            {
+                var result = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions());
+                thread = result.Value;
+                _threads[sessionId] = thread;
+            }
+
+            return thread;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public void RemoveThread(string sessionId)
+    {
+        _threads.Remove(sessionId);
     }
 
     // Implementation of other interface methods...

@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AssistantPoc.ConsoleApp", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AssistantPoc.Core", "AssistantPoc.Core\AssistantPoc.Core.csproj", "{DF447B1A-2C63-4438-920D-7F86AD2F0F4D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AssistantPoc.WebApi", "AssistantPoc.WebApi\AssistantPoc.WebApi.csproj", "{60EF3332-7848-4532-BB9A-4DDD9E3CB6D2}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{DF447B1A-2C63-4438-920D-7F86AD2F0F4D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{DF447B1A-2C63-4438-920D-7F86AD2F0F4D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{DF447B1A-2C63-4438-920D-7F86AD2F0F4D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{60EF3332-7848-4532-BB9A-4DDD9E3CB6D2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{60EF3332-7848-4532-BB9A-4DDD9E3CB6D2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{60EF3332-7848-4532-BB9A-4DDD9E3CB6D2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{60EF3332-7848-4532-BB9A-4DDD9E3CB6D2}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
