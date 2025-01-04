@@ -13,6 +13,9 @@ import { chatService } from '../services/chatService';
 import { Message } from '../types/chat';
 import { useNavigate } from 'react-router-dom';
 import { API_CONFIG } from '../config/api';
+import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 const { Text } = Typography;
 
@@ -93,26 +96,56 @@ export default function ChatPopup() {
 
   const formatMessageContent = (content: string) => {
     const imagePlaceholderRegex = /\{image:\/api\/file\/(.*?)\}/g;
-    const parts = content.split(imagePlaceholderRegex);
     
-    return parts.map((part, index) => {
-      if (index % 2 === 1) { // This is a file ID
-        const imageUrl = `${API_CONFIG.baseUrl}/api/file/${part}`;
-        return (
-          <img 
-            key={index} 
-            src={imageUrl} 
-            alt="Assistant generated" 
-            style={{ 
-              maxWidth: '100%', 
-              borderRadius: 4, 
-              margin: '8px 0' 
-            }} 
-          />
-        );
-      }
-      return <span key={index}>{part}</span>;
+    // Replace image placeholders with markdown image syntax
+    const markdownContent = content.replace(imagePlaceholderRegex, (_, fileId) => {
+      const imageUrl = `${API_CONFIG.baseUrl}/api/file/${fileId}`;
+      return `![Assistant generated](${imageUrl})`;
     });
+
+    return (
+      <ReactMarkdown
+        components={{
+          img: ({node, ...props}) => (
+            <img
+              {...props}
+              style={{ 
+                maxWidth: '100%', 
+                borderRadius: 4, 
+                margin: '8px 0' 
+              }} 
+            />
+          ),
+          p: ({node, ...props}) => (
+            <p 
+              {...props} 
+              style={{ 
+                margin: '0 0' 
+              }}
+            />
+          ),
+          code({node, inline, className, children, ...props}) {
+            const match = /language-(\w+)/.exec(className || '');
+            return !inline && match ? (
+              <SyntaxHighlighter
+                {...props}
+                style={vscDarkPlus}
+                language={match[1]}
+                PreTag="div"
+              >
+                {String(children).replace(/\n$/, '')}
+              </SyntaxHighlighter>
+            ) : (
+              <code {...props} className={className}>
+                {children}
+              </code>
+            );
+          }
+        }}
+      >
+        {markdownContent}
+      </ReactMarkdown>
+    );
   };
 
   return (
@@ -203,13 +236,11 @@ export default function ChatPopup() {
                       padding: '8px 12px',
                       borderRadius: 8,
                       maxWidth: '75%',
-                      wordBreak: 'break-word',
-                      whiteSpace: 'pre-wrap'
+                      wordBreak: 'break-word'
                     }}>
                       <Text style={{ 
                         color: message.isUser ? '#fff' : 'inherit',
-                        fontSize: 13,
-                        whiteSpace: 'pre-wrap'
+                        fontSize: 13
                       }}>
                         {formatMessageContent(message.content)}
                       </Text>
