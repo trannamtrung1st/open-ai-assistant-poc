@@ -6,13 +6,15 @@ interface ChatApiRequest {
   sessionId?: string;
 }
 
+interface CommandResult {
+  command: string;
+  data: any;
+}
+
 interface ChatApiResponse {
   content: string;
   sessionId: string;
-  navigateToAsset?: {
-    assetId: string;
-    found: boolean;
-  };
+  commandResult?: CommandResult;
 }
 
 interface ErrorResponse {

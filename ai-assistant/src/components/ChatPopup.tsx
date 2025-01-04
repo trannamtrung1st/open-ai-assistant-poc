@@ -12,6 +12,7 @@ import {
 import { chatService } from '../services/chatService';
 import { Message } from '../types/chat';
 import { useNavigate } from 'react-router-dom';
+import { API_CONFIG } from '../config/api';
 
 const { Text } = Typography;
 
@@ -68,8 +69,11 @@ export default function ChatPopup() {
 
       setMessages(prev => [...prev, aiMessage]);
       
-      if (response.navigateToAsset?.found) {
-        navigate(`/assets/${response.navigateToAsset.assetId}`);
+      if (response.commandResult?.command === 'NavigateToAsset') {
+        const data = response.commandResult.data;
+        if (data.found) {
+          navigate(`/assets/${data.assetId}`);
+        }
       }
     } catch (error) {
       console.error('Error sending message:', error);
@@ -85,6 +89,30 @@ export default function ChatPopup() {
       e.preventDefault();
       handleSendMessage();
     }
+  };
+
+  const formatMessageContent = (content: string) => {
+    const imagePlaceholderRegex = /\{image:\/api\/file\/(.*?)\}/g;
+    const parts = content.split(imagePlaceholderRegex);
+    
+    return parts.map((part, index) => {
+      if (index % 2 === 1) { // This is a file ID
+        const imageUrl = `${API_CONFIG.baseUrl}/api/file/${part}`;
+        return (
+          <img 
+            key={index} 
+            src={imageUrl} 
+            alt="Assistant generated" 
+            style={{ 
+              maxWidth: '100%', 
+              borderRadius: 4, 
+              margin: '8px 0' 
+            }} 
+          />
+        );
+      }
+      return <span key={index}>{part}</span>;
+    });
   };
 
   return (
@@ -183,7 +211,7 @@ export default function ChatPopup() {
                         fontSize: 13,
                         whiteSpace: 'pre-wrap'
                       }}>
-                        {message.content}
+                        {formatMessageContent(message.content)}
                       </Text>
                     </div>
                   </div>

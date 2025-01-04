@@ -32,12 +32,22 @@ public class ChatController : ControllerBase
             var (content, navigateCommand) = await _assistantService.RunThreadOnce(thread, null, 
                 () => _ => {});
 
-            return Ok(new ChatResponse 
+            var response = new ChatResponse 
             { 
                 Content = content,
-                SessionId = request.SessionId ?? thread.Id,
-                NavigateToAsset = navigateCommand
-            });
+                SessionId = request.SessionId ?? thread.Id
+            };
+
+            if (navigateCommand != null)
+            {
+                response.CommandResult = new CommandResult
+                {
+                    Command = navigateCommand.Command,
+                    Data = navigateCommand
+                };
+            }
+
+            return Ok(response);
         }
         catch (Exception ex)
         {

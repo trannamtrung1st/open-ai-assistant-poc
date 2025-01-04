@@ -27,6 +27,7 @@ public class AssistantService : IAssistantService
     private readonly Dictionary<string, AssistantThread> _threads = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
     private NavigateToAssetResponse? _lastNavigationCommand;
+    private const string ImagePlaceholderFormat = "{{image:{0}}}";
 
     public AssistantService(
         AzureOpenAIClient client,
@@ -151,7 +152,7 @@ public class AssistantService : IAssistantService
     public async Task<(string Content, NavigateToAssetResponse? NavigateCommand)> RunThreadOnce(
         AssistantThread thread, 
         string? assistantId,
-        Func<Action<string>> onMessageCreated)
+        Func<Action<MessageStatusUpdate>> onMessageCreated)
     {
         _lastNavigationCommand = null;
         assistantId ??= _config.AssistantId;
@@ -193,7 +194,7 @@ public class AssistantService : IAssistantService
     private async Task<AsyncCollectionResult<StreamingUpdate>?> ReadStreamingResult(
         AssistantThread thread,
         AsyncCollectionResult<StreamingUpdate> streamingResult,
-        Func<Action<string>> onMessageCreated,
+        Func<Action<MessageStatusUpdate>> onMessageCreated,
         Action<string> onContent)
     {
         await foreach (StreamingUpdate update in streamingResult)
@@ -205,14 +206,19 @@ public class AssistantService : IAssistantService
                     if (messageUpdate.Value.Role == MessageRole.Assistant)
                     {
                         var content = messageUpdate.Value.Content
-                            .Select(c => c.ImageFileId is null ? c.Text : $"[Image: {c.ImageUri}]")
+                            .Select(c => c.ImageFileId is null ? 
+                                c.Text : 
+                                string.Format(ImagePlaceholderFormat, $"/api/file/{c.ImageFileId}"))
                             .Where(c => !string.IsNullOrEmpty(c));
-                        onMessageCreated()?.Invoke(string.Join("", content));
+                        onMessageCreated()?.Invoke(messageUpdate);
                     }
                     break;
 
                 case MessageContentUpdate contentUpdate:
-                    onContent(contentUpdate.Text);
+                    var text = contentUpdate.ImageFileId is null ? 
+                        contentUpdate.Text : 
+                        string.Format(ImagePlaceholderFormat, $"/api/file/{contentUpdate.ImageFileId}");
+                    onContent(text);
                     break;
 
                 case RunUpdate runUpdate when update.UpdateKind == StreamingUpdateReason.RunFailed:

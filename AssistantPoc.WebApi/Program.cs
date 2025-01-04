@@ -24,9 +24,9 @@ builder.Services.AddAssistantServices(options =>
 {
     options.Endpoint = builder.Configuration["Assistant:Endpoint"]!;
     options.ApiKey = builder.Configuration["Assistant:ApiKey"]!;
-    options.InstructionsPath = "Documents/Instructions.md";
-    options.KnowledgeBasePath = "Documents/KnowledgeBase";
-    options.TimeSeriesPath = "Documents/Responses/GetTimeSeries.txt";
+    options.InstructionsPath = "../Documents/Instructions.md";
+    options.KnowledgeBasePath = "../Documents/KnowledgeBase";
+    options.TimeSeriesPath = "../Documents/Responses/GetTimeSeries.txt";
     options.AssistantId = builder.Configuration["Assistant:AssistantId"]!;
 });
 

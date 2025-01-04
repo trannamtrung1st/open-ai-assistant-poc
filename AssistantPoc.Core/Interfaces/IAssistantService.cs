@@ -10,7 +10,7 @@ public interface IAssistantService
     Task<(string Content, NavigateToAssetResponse? NavigateCommand)> RunThreadOnce(
         AssistantThread thread, 
         string? assistantId,
-        Func<Action<string>> onMessageCreated);
+        Func<Action<MessageStatusUpdate>> onMessageCreated);
     Task AddPrompt(AssistantThread thread, string message);
     Task<AssistantThread> GetOrCreateThread(string? sessionId = null);
     void RemoveThread(string sessionId);
