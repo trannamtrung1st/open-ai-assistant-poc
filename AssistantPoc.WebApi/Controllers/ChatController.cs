@@ -1,8 +1,6 @@
 using AssistantPoc.Core.Interfaces;
 using AssistantPoc.WebApi.Models;
 using Microsoft.AspNetCore.Mvc;
-using OpenAI.Assistants;
-using System.Text;
 
 namespace AssistantPoc.WebApi.Controllers;
 
@@ -26,14 +24,15 @@ public class ChatController : ControllerBase
     {
         try
         {
+            request.SessionId ??= Guid.NewGuid().ToString();
             var thread = await _assistantService.GetOrCreateThread(request.SessionId);
             await _assistantService.AddPrompt(thread, request.Message);
 
-            var (content, navigateCommand) = await _assistantService.RunThreadOnce(thread, null, 
-                () => _ => {});
+            var (content, navigateCommand) = await _assistantService.RunThreadOnce(thread, assistantId: null,
+                () => _ => { });
 
-            var response = new ChatResponse 
-            { 
+            var response = new ChatResponse
+            {
                 Content = content,
                 SessionId = request.SessionId ?? thread.Id
             };
@@ -55,4 +54,4 @@ public class ChatController : ControllerBase
             return StatusCode(500, new { error = ex.Message });
         }
     }
-} 
+}

@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
 using Azure.AI.OpenAI;
 using AssistantPoc.Core.Interfaces;
 using AssistantPoc.Core.Configuration;
@@ -12,7 +9,6 @@ using OpenAI.Files;
 using OpenAI.VectorStores;
 using Microsoft.Extensions.Options;
 using System.Text;
-using System.Threading;
 
 namespace AssistantPoc.Core.Services;
 
@@ -28,6 +24,8 @@ public class AssistantService : IAssistantService
     private readonly SemaphoreSlim _lock = new(1, 1);
     private NavigateToAssetResponse? _lastNavigationCommand;
     private const string ImagePlaceholderFormat = "{{image:{0}}}";
+    private readonly List<TimeSeriesData> _timeSeriesData = new();
+    private readonly object _timeSeriesLock = new();
 
     public AssistantService(
         AzureOpenAIClient client,
@@ -137,11 +135,10 @@ public class AssistantService : IAssistantService
 
         while (hasPrompt)
         {
-            var response = await RunThreadOnce(thread.Value, assistantId, () =>
-            {
-                Console.Write("[Assistant] ");
-                return (content) => Console.Write(content);
-            });
+            Console.Write("[Assistant] ");
+
+            var response = await RunThreadOnce(thread.Value, assistantId,
+                onContent: Console.Write);
 
             hasPrompt = await GetConsolePrompt(thread.Value);
         }
@@ -150,9 +147,10 @@ public class AssistantService : IAssistantService
     }
 
     public async Task<(string Content, NavigateToAssetResponse? NavigateCommand)> RunThreadOnce(
-        AssistantThread thread, 
+        AssistantThread thread,
         string? assistantId,
-        Func<Action<MessageStatusUpdate>> onMessageCreated)
+        Func<Action<MessageStatusUpdate>>? onMessageCreated = null,
+        Action<string>? onContent = null)
     {
         _lastNavigationCommand = null;
         assistantId ??= _config.AssistantId;
@@ -166,7 +164,11 @@ public class AssistantService : IAssistantService
         do
         {
             streamingResult = await ReadStreamingResult(thread, streamingResult, onMessageCreated,
-                content => responseBuilder.Append(content));
+                content =>
+                {
+                    responseBuilder.Append(content);
+                    onContent?.Invoke(content);
+                });
         } while (streamingResult is not null);
 
         return (responseBuilder.ToString(), _lastNavigationCommand);
@@ -194,8 +196,8 @@ public class AssistantService : IAssistantService
     private async Task<AsyncCollectionResult<StreamingUpdate>?> ReadStreamingResult(
         AssistantThread thread,
         AsyncCollectionResult<StreamingUpdate> streamingResult,
-        Func<Action<MessageStatusUpdate>> onMessageCreated,
-        Action<string> onContent)
+        Func<Action<MessageStatusUpdate>>? onMessageCreated,
+        Action<string>? onContent)
     {
         await foreach (StreamingUpdate update in streamingResult)
         {
@@ -206,24 +208,24 @@ public class AssistantService : IAssistantService
                     if (messageUpdate.Value.Role == MessageRole.Assistant)
                     {
                         var content = messageUpdate.Value.Content
-                            .Select(c => c.ImageFileId is null ? 
-                                c.Text : 
+                            .Select(c => c.ImageFileId is null ?
+                                c.Text :
                                 string.Format(ImagePlaceholderFormat, $"/api/file/{c.ImageFileId}"))
                             .Where(c => !string.IsNullOrEmpty(c));
-                        onMessageCreated()?.Invoke(messageUpdate);
+                        onMessageCreated?.Invoke()?.Invoke(messageUpdate);
                     }
                     break;
 
                 case MessageContentUpdate contentUpdate:
-                    var text = contentUpdate.ImageFileId is null ? 
-                        contentUpdate.Text : 
+                    var text = contentUpdate.ImageFileId is null ?
+                        contentUpdate.Text :
                         string.Format(ImagePlaceholderFormat, $"/api/file/{contentUpdate.ImageFileId}");
-                    onContent(text);
+                    onContent?.Invoke(text);
                     break;
 
                 case RunUpdate runUpdate when update.UpdateKind == StreamingUpdateReason.RunFailed:
                     var errorMessage = $"[Error] {runUpdate.Value.LastError?.Message ?? "Unknown error"}";
-                    onContent(errorMessage);
+                    onContent?.Invoke(errorMessage);
                     return null;
 
                 case RequiredActionUpdate actionUpdate:
@@ -281,15 +283,22 @@ public class AssistantService : IAssistantService
     {
         await Task.CompletedTask;
         AssetEntity? assetEntity = null;
-        if (command.AssetId is not null && Guid.TryParse(command.AssetId, out var assetId))
+
+        void GetAssetByName(string name)
         {
-            assetEntity = DataStore.Assets.FirstOrDefault(a => a.Id == assetId);
+            assetEntity = DataStore.Assets.FirstOrDefault(a =>
+                string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (command.AssetId is not null)
+        {
+            if (Guid.TryParse(command.AssetId, out var assetId))
+                assetEntity = DataStore.Assets.FirstOrDefault(a => a.Id == assetId);
+            else GetAssetByName(command.AssetId);
         }
         else if (!string.IsNullOrWhiteSpace(command.AssetName))
-        {
-            assetEntity = DataStore.Assets.FirstOrDefault(a => 
-                string.Equals(a.Name, command.AssetName, StringComparison.OrdinalIgnoreCase));
-        }
+            GetAssetByName(command.AssetName);
+
         var response = new NavigateToAssetResponse
         {
             AssetId = assetEntity?.Id,
@@ -301,6 +310,7 @@ public class AssistantService : IAssistantService
 
     private async Task<GetTimeSeriesResponse> GetTimeSeries(AssistantThread thread, GetTimeSeriesCommand command)
     {
+        await Task.CompletedTask;
         var response = new GetTimeSeriesResponse
         {
             AssetId = FindAsset(command)?.Id,
@@ -310,15 +320,17 @@ public class AssistantService : IAssistantService
         response.Found = response.AssetId.HasValue;
         if (!response.Found) return response;
 
-        var timeSeriesPath = _config.TimeSeriesPath ?? throw new ArgumentNullException(nameof(_config.TimeSeriesPath));
+        var now = DateTime.UtcNow;
+        var from = command.From ?? now.AddDays(-7);
+        var to = command.To ?? now;
 
         if (Environment.GetEnvironmentVariable("USE_THREAD_FILES") != "1")
         {
-            response.Content = await File.ReadAllTextAsync(timeSeriesPath);
+            response.Content = GenerateTimeSeriesData(from, to);
             return response;
         }
 
-        return await HandleThreadFiles(thread, timeSeriesPath, response);
+        return await HandleThreadFiles(thread, response);
     }
 
     private AssetEntity? FindAsset(GetTimeSeriesCommand command)
@@ -339,12 +351,12 @@ public class AssistantService : IAssistantService
 
     private async Task<GetTimeSeriesResponse> HandleThreadFiles(
         AssistantThread thread,
-        string timeSeriesPath,
         GetTimeSeriesResponse response)
     {
         const string KeyVectorStoreId = nameof(KeyVectorStoreId);
         const string KeyTimeSeriesFileId = nameof(KeyTimeSeriesFileId);
 
+        var timeSeriesPath = _config.TimeSeriesPath ?? throw new ArgumentNullException(nameof(_config.TimeSeriesPath));
         var fileName = Path.GetFileName(timeSeriesPath);
         var uploadResult = await _fileService.UploadFile(
             File.OpenRead(timeSeriesPath),
@@ -420,7 +432,7 @@ public class AssistantService : IAssistantService
         try
         {
             sessionId ??= Guid.NewGuid().ToString();
-            
+
             if (!_threads.TryGetValue(sessionId, out var thread))
             {
                 var result = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions());
@@ -441,5 +453,110 @@ public class AssistantService : IAssistantService
         _threads.Remove(sessionId);
     }
 
-    // Implementation of other interface methods...
+    private void EnsureTimeSeriesData(int records, int intervalSeconds = 60)
+    {
+        lock (_timeSeriesLock)
+        {
+            if (_timeSeriesData.Any()) return;
+
+            var random = new Random();
+            var series = new List<SeriesConfig>
+            {
+                new() {
+                    Name = "Temperature",
+                    BaseValue = 23.0,
+                    NormalVariation = 0.5,
+                    AnomalyVariation = 5.0,
+                    AnomalyChance = 0.05
+                },
+                new() {
+                    Name = "Humidity",
+                    BaseValue = 45.0,
+                    NormalVariation = 1.0,
+                    AnomalyVariation = 20.0,
+                    AnomalyChance = 0.05
+                },
+                new() {
+                    Name = "Pressure",
+                    BaseValue = 1013.25,
+                    NormalVariation = 2.0,
+                    AnomalyVariation = 15.0,
+                    AnomalyChance = 0.03
+                },
+                new() {
+                    Name = "Velocity",
+                    BaseValue = 5.0,
+                    NormalVariation = 0.3,
+                    AnomalyVariation = 3.0,
+                    AnomalyChance = 0.08
+                }
+            };
+
+            var baseTime = DateTime.UtcNow.AddHours(1);
+            for (int i = 0; i < records; i++)
+            {
+                var data = new TimeSeriesData
+                {
+                    Timestamp = baseTime.AddSeconds(-i * intervalSeconds)
+                };
+
+                foreach (var s in series)
+                {
+                    data.Values[s.Name.ToLower()] = GenerateValue(random, s);
+                }
+
+                _timeSeriesData.Add(data);
+            }
+
+            _timeSeriesData.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+        }
+    }
+
+    private string GenerateTimeSeriesData(DateTime from, DateTime to)
+    {
+        EnsureTimeSeriesData(records: 50000, intervalSeconds: 60);
+
+        var filteredData = _timeSeriesData
+            .Where(d => d.Timestamp >= from && d.Timestamp <= to)
+            .OrderBy(d => d.Timestamp)
+            .ToList();
+
+        if (!filteredData.Any())
+            return string.Empty;
+
+        var sb = new StringBuilder();
+
+        // Header using the column names from the first record
+        var columns = new[] { "timestamp" }.Concat(filteredData[0].Values.Keys).ToList();
+        sb.AppendLine(string.Join(",", columns));
+
+        // Data rows
+        foreach (var data in filteredData)
+        {
+            var values = new[] { data.Timestamp.ToString("yyyy-MM-ddTHH:mm:ssZ") }
+                .Concat(columns.Skip(1).Select(c => data.Values[c].ToString("F2")));
+            sb.AppendLine(string.Join(",", values));
+        }
+
+        return sb.ToString();
+    }
+
+    private double GenerateValue(Random random, SeriesConfig config)
+    {
+        var isAnomaly = random.NextDouble() < config.AnomalyChance;
+        var variation = isAnomaly ? config.AnomalyVariation : config.NormalVariation;
+        var delta = (random.NextDouble() * 2 - 1) * variation;
+        var value = config.BaseValue + delta;
+
+        return Math.Round(value, 2);
+    }
+}
+
+public class SeriesConfig
+{
+    public required string Name { get; set; }
+    public double BaseValue { get; set; }
+    public double NormalVariation { get; set; }
+    public double AnomalyVariation { get; set; }
+    public double AnomalyChance { get; set; }
 }
