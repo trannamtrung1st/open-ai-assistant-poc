@@ -15,4 +15,5 @@ public interface IAssistantService
     Task AddPrompt(AssistantThread thread, string message);
     Task<AssistantThread> GetOrCreateThread(string? sessionId = null);
     void RemoveThread(string sessionId);
+    Task<int> GetTokenCount(string sessionId);
 }

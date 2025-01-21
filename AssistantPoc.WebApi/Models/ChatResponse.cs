@@ -13,4 +13,4 @@ public class CommandResult
 {
     public required string Command { get; set; }
     public required object Data { get; set; }
-} 
+}

@@ -9,6 +9,7 @@ using OpenAI.Files;
 using OpenAI.VectorStores;
 using Microsoft.Extensions.Options;
 using System.Text;
+using System.Globalization;
 
 namespace AssistantPoc.Core.Services;
 
@@ -514,6 +515,8 @@ public class AssistantService : IAssistantService
 
     private string GenerateTimeSeriesData(DateTime from, DateTime to)
     {
+        CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+        CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
         EnsureTimeSeriesData(records: 50000, intervalSeconds: 60);
 
         var filteredData = _timeSeriesData
@@ -549,6 +552,13 @@ public class AssistantService : IAssistantService
         var value = config.BaseValue + delta;
 
         return Math.Round(value, 2);
+    }
+
+    public async Task<int> GetTokenCount(string sessionId)
+    {
+        var thread = await GetOrCreateThread(sessionId);
+        var tokenCount = _assistantClient.GetRuns(thread.Id).Select(r => r.Usage.TotalTokenCount).Sum();
+        return tokenCount;
     }
 }
 

@@ -32,6 +32,7 @@ export default function ChatPopup() {
     }
   ]);
   const [isTyping, setIsTyping] = useState(false);
+  const [tokenCount, setTokenCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>();
@@ -41,8 +42,16 @@ export default function ChatPopup() {
   };
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    if (sessionId && messages) {
+      scrollToBottom();
+      handleTokenCount(sessionId);
+    }
+  }, [messages, sessionId]);
+  
+  const handleTokenCount = async (sessionId: string) => {
+    const tokenCount = await chatService.getTokenCount(sessionId);
+    setTokenCount(tokenCount);
+  };
 
   const handleSendMessage = async () => {
     if (!inputValue.trim() || isLoading) return;
@@ -197,6 +206,10 @@ export default function ChatPopup() {
                     <br />
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       {isTyping ? 'Typing...' : 'Online'}
+                    </Text>
+                    {' '}
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      ({tokenCount} tokens)
                     </Text>
                   </div>
                 </div>

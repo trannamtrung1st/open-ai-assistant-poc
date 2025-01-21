@@ -1,10 +1,4 @@
 import { API_CONFIG } from '../config/api';
-import { Message } from '../types/chat';
-
-interface ChatApiRequest {
-  message: string;
-  sessionId?: string;
-}
 
 interface CommandResult {
   command: string;
@@ -22,6 +16,14 @@ interface ErrorResponse {
 }
 
 export const chatService = {
+  getTokenCount: async (sessionId: string): Promise<number> => {
+    const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chat}/token-count?sessionId=${sessionId}`, {
+      method: 'GET'
+    });
+    const data = await response.json();
+    return data.tokenCount;
+  },
+  
   sendMessage: async (message: string, sessionId?: string): Promise<ChatApiResponse> => {
     try {
       const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chat}`, {

@@ -54,4 +54,11 @@ public class ChatController : ControllerBase
             return StatusCode(500, new { error = ex.Message });
         }
     }
+
+    [HttpGet("token-count")]
+    public async Task<IActionResult> GetTokenCount(string sessionId)
+    {
+        var tokenCount = await _assistantService.GetTokenCount(sessionId);
+        return Ok(new { tokenCount });
+    }
 }
