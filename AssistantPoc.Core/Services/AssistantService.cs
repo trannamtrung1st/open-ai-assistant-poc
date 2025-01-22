@@ -54,6 +54,8 @@ public class AssistantService : IAssistantService
 
         if (assistantResult.Value is null)
             throw new Exception("Failed to create assistant");
+
+        Console.WriteLine(assistantResult.Value.Id);
     }
 
     private AssistantCreationOptions CreateAssistantOptions(string instructions, List<string> fileIds)
@@ -328,6 +330,7 @@ public class AssistantService : IAssistantService
         if (Environment.GetEnvironmentVariable("USE_THREAD_FILES") != "1")
         {
             response.Content = GenerateTimeSeriesData(from, to);
+            File.WriteAllText("../Local/timeseries.txt", response.Content);
             return response;
         }
 
