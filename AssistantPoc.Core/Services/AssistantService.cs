@@ -11,7 +11,7 @@ using Microsoft.Extensions.Options;
 using System.Text;
 using System.Globalization;
 using AssistantPoc.Core.Constants;
-using System.Data.SqlTypes;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace AssistantPoc.Core.Services;
 
@@ -21,9 +21,9 @@ public class AssistantService : IAssistantService
     private readonly AssistantClient _assistantClient;
     private readonly VectorStoreClient _vectorStoreClient;
     private readonly OpenAIFileClient _fileClient;
-    private readonly IFileService _fileService;
+    private readonly IAssistantFileService _fileService;
+    private readonly IMemoryCache _memoryCache;
     private readonly AssistantConfiguration _config;
-    private readonly Dictionary<string, AssistantThread> _threads = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
     private const string ImagePlaceholderFormat = "{{image:{0}}}";
     private readonly List<TimeSeriesData> _timeSeriesData = new();
@@ -34,7 +34,8 @@ public class AssistantService : IAssistantService
         AssistantClient assistantClient,
         VectorStoreClient vectorStoreClient,
         OpenAIFileClient fileClient,
-        IFileService fileService,
+        IAssistantFileService fileService,
+        IMemoryCache memoryCache,
         IOptions<AssistantConfiguration> options)
     {
         _client = client;
@@ -42,51 +43,447 @@ public class AssistantService : IAssistantService
         _vectorStoreClient = vectorStoreClient;
         _fileClient = fileClient;
         _fileService = fileService;
+        _memoryCache = memoryCache;
         _config = options.Value;
     }
 
-    public async Task CreateAssistant()
+    public async Task<string> CreateAssistant(CancellationToken cancellationToken = default)
     {
-        var fileIds = await _fileService.UploadKnowledgeBaseFiles(_config.KnowledgeBasePath);
         var instructionsContent = await File.ReadAllTextAsync(_config.InstructionsPath);
-
-        var assistantOptions = CreateAssistantOptions(instructionsContent, fileIds);
-        var assistantResult = await _assistantClient.CreateAssistantAsync("gpt-4o", assistantOptions);
-
+        var assistantOptions = CreateAssistantOptions(instructionsContent);
+        var assistantResult = await _assistantClient.CreateAssistantAsync("gpt-4o", assistantOptions, cancellationToken);
         if (assistantResult.Value is null)
             throw new Exception("Failed to create assistant");
-
-        Console.WriteLine(assistantResult.Value.Id);
+        var assistantId = assistantResult.Value.Id;
+        return assistantId;
     }
 
-    private AssistantCreationOptions CreateAssistantOptions(string instructions, List<string> fileIds)
+    public async Task DeleteAssistant(string assistantId, CancellationToken cancellationToken = default)
+    {
+        await _assistantClient.DeleteAssistantAsync(assistantId, cancellationToken);
+    }
+
+    public async Task RunConsoleThread(string? assistantId = null, CancellationToken cancellationToken = default)
+    {
+        assistantId ??= _config.AssistantId;
+        var thread = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions(), cancellationToken: cancellationToken);
+        bool hasPrompt = true;
+
+        while (hasPrompt)
+        {
+            Console.Write("[Assistant] ");
+
+            var response = await RunThreadOnce(thread.Value, assistantId,
+                onContent: Console.Write,
+                cancellationToken: cancellationToken);
+
+            hasPrompt = await GetConsolePrompt(thread.Value, cancellationToken: cancellationToken);
+        }
+
+        await _assistantClient.DeleteThreadAsync(thread.Value.Id, cancellationToken: cancellationToken);
+    }
+
+    public async Task<(string Content, IEnumerable<CommandResult>? Results)> RunThreadOnce(
+        AssistantThread thread,
+        string? assistantId,
+        Func<Action<MessageStatusUpdate>>? onMessageCreated = null,
+        Action<string>? onContent = null,
+        CancellationToken cancellationToken = default)
+    {
+        assistantId ??= _config.AssistantId;
+        var responseBuilder = new StringBuilder();
+        IEnumerable<CommandResult>? commandResults = null;
+        var streamingResult = _assistantClient.CreateRunStreamingAsync(
+            thread.Id,
+            assistantId,
+            new RunCreationOptions(),
+            cancellationToken: cancellationToken);
+
+        do
+        {
+            streamingResult = await ReadStreamingResult(thread, streamingResult, onMessageCreated,
+                onCommandResult: (result) => commandResults = result,
+                onContent: content =>
+                {
+                    responseBuilder.Append(content);
+                    onContent?.Invoke(content);
+                },
+                cancellationToken: cancellationToken);
+        } while (streamingResult is not null);
+
+        return (responseBuilder.ToString(), commandResults);
+    }
+
+    public async Task AddPrompt(AssistantThread thread, string message, CancellationToken cancellationToken = default)
+    {
+        var prompt = AppendPromptMetadata(message);
+        await _assistantClient.CreateMessageAsync(thread.Id, MessageRole.User,
+            content: [MessageContent.FromText(prompt)],
+            cancellationToken: cancellationToken);
+    }
+
+    public async Task<AssistantThread> GetOrCreateThread(string? sessionId = null, CancellationToken cancellationToken = default)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            AssistantThread thread;
+
+            if (sessionId is null)
+            {
+                var result = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions(), cancellationToken);
+                thread = result.Value;
+            }
+            else
+            {
+                thread = await _memoryCache.GetOrCreateAsync(sessionId, async (entry) =>
+                {
+                    entry.AbsoluteExpirationRelativeToNow = _config.CacheExpiry;
+                    var result = await _assistantClient.GetThreadAsync(sessionId, cancellationToken);
+                    return result.Value;
+                }) ?? throw new Exception("Invalid thread");
+            }
+
+            return thread;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private AssistantCreationOptions CreateAssistantOptions(string instructions)
     {
         var options = new AssistantCreationOptions
         {
-            Name = "AHI AI Assistant",
+            Name = _config.AssistantName,
+            Description = _config.Version,
             Instructions = instructions,
             Tools = { },
-            ToolResources = new()
-            {
-                FileSearch = new()
-                {
-                    NewVectorStores = { new VectorStoreCreationHelper(fileIds) }
-                }
-            },
-            Temperature = 0.1f,
+            ToolResources = new(),
+            Temperature = _config.Temperature,
             ResponseFormat = AssistantResponseFormat.Auto
         };
 
-        AddTools(options);
+        AddTools(options.Tools);
         return options;
     }
 
-    private void AddTools(AssistantCreationOptions options)
+    private void AddTools(IList<ToolDefinition> tools)
     {
-        options.Tools.Add(new FileSearchToolDefinition());
-        options.Tools.Add(new CodeInterpreterToolDefinition());
-        options.Tools.Add(CreateNavigateToAssetTool());
-        options.Tools.Add(CreateGetTimeSeriesTool());
+        tools.Add(CreateNavigateToPageTool());
+        tools.Add(CreateSwitchSubscriptionTool());
+        tools.Add(CreateSwitchProjectTool());
+        tools.Add(CreateSwitchApplicationTool());
+        tools.Add(CreateSearchAssetTool());
+        tools.Add(CreateSearchDeviceTool());
+        tools.Add(CreateSearchSubscriptionTool());
+        tools.Add(CreateSearchProjectTool());
+    }
+
+    private FunctionToolDefinition CreateNavigateToPageTool()
+    {
+        return new FunctionToolDefinition("NavigateToPage")
+        {
+            Description = "Navigate to a specific page in the AHI platform",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "subscriptionId": {
+            "type": "string",
+            "description": "Id (GUID) of the subscription to navigate to"
+        },
+        "projectId": {
+            "type": "string",
+            "description": "Id (GUID) of the project to navigate to"
+        },
+        "params": {
+            "type": "string",
+            "description": "the parameters required for the page, if backend returns exact ids, use the ids as values instead of user's input. The params is a json string with this format:\r\n    ```json\r\n    {\r\n      \"param1\": \"value1\",\r\n      \"param2\": \"value2\"\r\n    }\r\n    ```\r\n"
+        },
+        "application": {
+            "type": "string",
+            "description": "the application to navigate to",
+            "enum": [
+                "DataManagement",
+                "DataInsight"
+            ]
+        },
+        "page": {
+            "type": "string",
+            "description": "the page to navigate to",
+            "enum": [
+                "ASSET_LIST_TREE",
+                "EDIT_ASSET",
+                "ASSET_TEMPLATE_LIST",
+                "ADD_ASSET_TEMPLATE",
+                "EDIT_ASSET_TEMPLATE",
+                "IMPORT_ASSET_TEMPLATE",
+                "TABLE_LIST",
+                "MEDIA_LIST",
+                "BLOCK_TEMPLATE_LIST",
+                "ADD_BLOCK_TEMPLATE",
+                "EDIT_BLOCK_TEMPLATE",
+                "BLOCK_EXECUTION_LIST",
+                "ADD_BLOCK_EXECUTION",
+                "EDIT_BLOCK_EXECUTION",
+                "DEVICE_LIST",
+                "ADD_DEVICE",
+                "EDIT_DEVICE",
+                "IMPORT_DEVICE",
+                "DEVICE_TEMPLATE_LIST",
+                "ADD_DEVICE_TEMPLATE",
+                "EDIT_DEVICE_TEMPLATE",
+                "IMPORT_DEVICE_TEMPLATE",
+                "ALARM_LIST",
+                "ALARM_HISTORY_LIST",
+                "TIMELINE_VIEW",
+                "RULE_LIST",
+                "ADD_ALARM_RULE",
+                "EDIT_ALARM_RULE",
+                "IMPORT_ALARM_RULE",
+                "ACTION_LIST",
+                "ADD_ACTION",
+                "EDIT_ACTION",
+                "IMPORT_ACTION",
+                "BROKER_LIST",
+                "ADD_BROKER",
+                "EDIT_BROKER",
+                "IMPORT_BROKER",
+                "INTEGRATION_LIST",
+                "ADD_INTEGRATION",
+                "EDIT_INTEGRATION",
+                "UOM_LIST",
+                "ADD_UOM",
+                "EDIT_UOM",
+                "IMPORT_UOM",
+                "EVENT_FORWARDING_LIST",
+                "ADD_EVENT_FORWARDING",
+                "EDIT_EVENT_FORWARDING",
+                "USER_LIST",
+                "ADD_USER",
+                "EDIT_USER",
+                "GROUP_LIST",
+                "ADD_GROUP",
+                "EDIT_GROUP",
+                "ROLE_LIST",
+                "EDIT_ROLE",
+                "API_CLIENT_LIST",
+                "ADD_API_CLIENT",
+                "EDIT_API_CLIENT",
+                "ACTIVITY_LOG_LIST",
+                "ACTIVITY_LOG_DETAIL",
+                "PROJECT_LIST",
+                "DASHBOARD_LIST",
+                "EDIT_DASHBOARD",
+                "DASHBOARD_TEMPLATE_LIST",
+                "ADD_DASHBOARD_TEMPLATE",
+                "EDIT_DASHBOARD_TEMPLATE",
+                "IMPORT_DASHBOARD_TEMPLATE",
+                "DASHBOARD_MEDIA_LIST",
+                "EDIT_MEDIA",
+                "REPORT_TEMPLATE",
+                "REPORT_SCHEDULE",
+                "REPORT_DETAIL",
+                "REPORT_TEMPLATE_LIST",
+                "ADD_REPORT_TEMPLATE",
+                "EDIT_REPORT_TEMPLATE",
+                "PREVIEW_REPORT_TEMPLATE",
+                "REPORT_SCHEDULE_LIST",
+                "ADD_REPORT_SCHEDULE",
+                "EDIT_REPORT_SCHEDULE"
+            ]
+        }
+    },
+    "required": [
+        "page",
+        "application"
+    ]
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
+    }
+
+    private FunctionToolDefinition CreateSwitchSubscriptionTool()
+    {
+        return new FunctionToolDefinition("SwitchSubscription")
+        {
+            Description = "Switch to a different subscription",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "subscriptionName": {
+            "type": "string",
+            "description": "Name of the subscription to switch to"
+        },
+        "subscriptionId": {
+            "type": "string",
+            "description": "Id (GUID) of the subscription to switch to"
+        }
+    },
+    "required": []
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
+    }
+
+    private FunctionToolDefinition CreateSwitchProjectTool()
+    {
+        return new FunctionToolDefinition("SwitchProject")
+        {
+            Description = "Switch to a different project",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "projectName": {
+            "type": "string",
+            "description": "Name of the project to switch to"
+        },
+        "projectId": {
+            "type": "string",
+            "description": "Id (GUID) of the project to switch to"
+        }
+    },
+    "required": []
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
+    }
+
+    private FunctionToolDefinition CreateSwitchApplicationTool()
+    {
+        return new FunctionToolDefinition("SwitchApplication")
+        {
+            Description = "Switch to a different application",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "application": {
+            "type": "string",
+            "description": "The application to navigate to"
+        }
+    },
+    "required": []
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
+    }
+
+    private FunctionToolDefinition CreateSearchAssetTool()
+    {
+        return new FunctionToolDefinition("SearchAsset")
+        {
+            Description = "Search for assets in the AHI platform",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "projectId": {
+            "type": "string",
+            "description": "Id (GUID) of the project"
+        },
+        "term": {
+            "type": "string",
+            "description": "The term to search for"
+        }
+    },
+    "required": []
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
+    }
+
+    private FunctionToolDefinition CreateSearchDeviceTool()
+    {
+        return new FunctionToolDefinition("SearchDevice")
+        {
+            Description = "Search for devices in the AHI platform",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "projectId": {
+            "type": "string",
+            "description": "Id (GUID) of the project"
+        },
+        "term": {
+            "type": "string",
+            "description": "The term to search for"
+        },
+        "status": {
+            "type": "string",
+            "description": "The status of devices",
+            "enum": [
+                "connected",
+                "disconnected",
+                "unknown"
+            ]
+        }
+    },
+    "required": []
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
+    }
+
+    private FunctionToolDefinition CreateSearchSubscriptionTool()
+    {
+        return new FunctionToolDefinition("SearchSubscription")
+        {
+            Description = "Search for subscriptions in the AHI platform",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "term": {
+            "type": "string",
+            "description": "The term to search for"
+        }
+    },
+    "required": []
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
+    }
+
+    private FunctionToolDefinition CreateSearchProjectTool()
+    {
+        return new FunctionToolDefinition("SearchProject")
+        {
+            Description = "Search for projects in the AHI platform",
+            Parameters = BinaryData.FromString(
+"""
+{
+    "type": "object",
+    "properties": {
+        "term": {
+            "type": "string",
+            "description": "The term to search for"
+        }
+    },
+    "required": []
+}
+"""),
+            StrictParameterSchemaEnabled = false
+        };
     }
 
     private FunctionToolDefinition CreateNavigateToAssetTool()
@@ -131,54 +528,7 @@ public class AssistantService : IAssistantService
         };
     }
 
-    public async Task RunConsoleThread(string? assistantId = null)
-    {
-        assistantId ??= _config.AssistantId;
-        var thread = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions());
-        bool hasPrompt = true;
-
-        while (hasPrompt)
-        {
-            Console.Write("[Assistant] ");
-
-            var response = await RunThreadOnce(thread.Value, assistantId,
-                onContent: Console.Write);
-
-            hasPrompt = await GetConsolePrompt(thread.Value);
-        }
-
-        await _assistantClient.DeleteThreadAsync(thread.Value.Id);
-    }
-
-    public async Task<(string Content, IEnumerable<CommandResult>? Results)> RunThreadOnce(
-        AssistantThread thread,
-        string? assistantId,
-        Func<Action<MessageStatusUpdate>>? onMessageCreated = null,
-        Action<string>? onContent = null)
-    {
-        assistantId ??= _config.AssistantId;
-        var responseBuilder = new StringBuilder();
-        IEnumerable<CommandResult>? commandResults = null;
-        var streamingResult = _assistantClient.CreateRunStreamingAsync(
-            thread.Id,
-            assistantId,
-            new RunCreationOptions());
-
-        do
-        {
-            streamingResult = await ReadStreamingResult(thread, streamingResult, onMessageCreated,
-                onCommandResult: (result) => commandResults = result,
-                onContent: content =>
-                {
-                    responseBuilder.Append(content);
-                    onContent?.Invoke(content);
-                });
-        } while (streamingResult is not null);
-
-        return (responseBuilder.ToString(), commandResults);
-    }
-
-    private async Task<bool> GetConsolePrompt(AssistantThread thread)
+    private async Task<bool> GetConsolePrompt(AssistantThread thread, CancellationToken cancellationToken)
     {
         Console.WriteLine();
         Console.Write("[User] ");
@@ -186,15 +536,8 @@ public class AssistantService : IAssistantService
         if (string.IsNullOrEmpty(prompt))
             return false;
 
-        await AddPrompt(thread, prompt);
+        await AddPrompt(thread, prompt, cancellationToken: cancellationToken);
         return true;
-    }
-
-    public async Task AddPrompt(AssistantThread thread, string message)
-    {
-        var prompt = AppendPromptMetadata(message);
-        await _assistantClient.CreateMessageAsync(thread.Id, MessageRole.User,
-            content: [MessageContent.FromText(prompt)]);
     }
 
     private async Task<AsyncCollectionResult<StreamingUpdate>?> ReadStreamingResult(
@@ -202,7 +545,8 @@ public class AssistantService : IAssistantService
         AsyncCollectionResult<StreamingUpdate> streamingResult,
         Func<Action<MessageStatusUpdate>>? onMessageCreated,
         Action<IEnumerable<CommandResult>>? onCommandResult,
-        Action<string>? onContent)
+        Action<string>? onContent,
+        CancellationToken cancellationToken = default)
     {
         await foreach (StreamingUpdate update in streamingResult)
         {
@@ -234,7 +578,7 @@ public class AssistantService : IAssistantService
                     return null;
 
                 case RequiredActionUpdate actionUpdate:
-                    return await HandleActionUpdate(thread, actionUpdate, onCommandResult);
+                    return await HandleActionUpdate(thread, actionUpdate, onCommandResult, cancellationToken);
             }
         }
         return null;
@@ -251,7 +595,8 @@ public class AssistantService : IAssistantService
     private async Task<AsyncCollectionResult<StreamingUpdate>> HandleActionUpdate(
         AssistantThread thread,
         RequiredActionUpdate actionUpdate,
-        Action<IEnumerable<CommandResult>>? onCommandResult)
+        Action<IEnumerable<CommandResult>>? onCommandResult,
+        CancellationToken cancellationToken = default)
     {
         var requiredActions = actionUpdate.Value.RequiredActions;
         var toolOutputs = new List<ToolOutput>();
@@ -260,7 +605,7 @@ public class AssistantService : IAssistantService
 
         foreach (var action in requiredActions)
         {
-            (string responseJson, CommandResult? commandResult) = await GetActionResponse(thread, action, messageContext);
+            (string responseJson, CommandResult? commandResult) = await GetActionResponse(thread, action, messageContext, cancellationToken: cancellationToken);
             if (commandResult is not null)
                 commandResults.Add(commandResult);
             toolOutputs.Add(new ToolOutput(action.ToolCallId, responseJson));
@@ -270,10 +615,11 @@ public class AssistantService : IAssistantService
         return _assistantClient.SubmitToolOutputsToRunStreamingAsync(
             threadId: thread.Id,
             runId: actionUpdate.Value.Id,
-            toolOutputs: toolOutputs);
+            toolOutputs: toolOutputs,
+            cancellationToken: cancellationToken);
     }
 
-    private async Task<(string Json, CommandResult? Result)> GetActionResponse(AssistantThread thread, RequiredAction action, MessageContext messageContext)
+    private async Task<(string Json, CommandResult? Result)> GetActionResponse(AssistantThread thread, RequiredAction action, MessageContext messageContext, CancellationToken cancellationToken = default)
     {
         object? response = action.FunctionName switch
         {
@@ -357,14 +703,14 @@ public class AssistantService : IAssistantService
         {
             return new NavigateToPageResponse
             {
-                Status = ResponseStatus.NEED_MORE_INFO,
+                Status = AssistantResponseStatus.NEED_MORE_INFO,
                 ForParams = missingParams
             };
         }
 
         return new NavigateToPageResponse()
         {
-            Status = ResponseStatus.SUCCESS,
+            Status = AssistantResponseStatus.SUCCESS,
             SubscriptionId = subscriptionId,
             ProjectId = projectId,
             Application = command.Application,
@@ -392,7 +738,7 @@ public class AssistantService : IAssistantService
         return new SearchProjectResponse
         {
             Data = projectEntities,
-            Status = ResponseStatus.SUCCESS
+            Status = AssistantResponseStatus.SUCCESS
         };
     }
 
@@ -415,7 +761,7 @@ public class AssistantService : IAssistantService
         return new SearchSubscriptionResponse
         {
             Data = subscriptionEntities,
-            Status = ResponseStatus.SUCCESS
+            Status = AssistantResponseStatus.SUCCESS
         };
     }
 
@@ -433,7 +779,7 @@ public class AssistantService : IAssistantService
         {
             return new SearchDeviceResponse
             {
-                Status = ResponseStatus.NEED_MORE_INFO,
+                Status = AssistantResponseStatus.NEED_MORE_INFO,
                 ForParams = missingParams
             };
         }
@@ -448,7 +794,7 @@ public class AssistantService : IAssistantService
         var response = new SearchDeviceResponse
         {
             Data = deviceEntities,
-            Status = ResponseStatus.SUCCESS
+            Status = AssistantResponseStatus.SUCCESS
         };
         return response;
     }
@@ -507,6 +853,50 @@ public class AssistantService : IAssistantService
         }
 
         return await HandleThreadFiles(thread, response);
+    }
+
+    private async Task CreateAssistantDemo(CancellationToken cancellationToken = default)
+    {
+        var fileIds = await _fileService.UploadKnowledgeBaseFiles(_config.KnowledgeBasePath, cancellationToken);
+        var instructionsContent = await File.ReadAllTextAsync(_config.InstructionsPath);
+
+        var assistantOptions = CreateAssistantOptionsDemo(instructionsContent, fileIds);
+        var assistantResult = await _assistantClient.CreateAssistantAsync("gpt-4o", assistantOptions, cancellationToken);
+
+        if (assistantResult.Value is null)
+            throw new Exception("Failed to create assistant");
+
+        Console.WriteLine(assistantResult.Value.Id);
+    }
+
+    private AssistantCreationOptions CreateAssistantOptionsDemo(string instructions, List<string> fileIds)
+    {
+        var options = new AssistantCreationOptions
+        {
+            Name = "AHI AI Assistant",
+            Instructions = instructions,
+            Tools = { },
+            ToolResources = new()
+            {
+                FileSearch = new()
+                {
+                    NewVectorStores = { new VectorStoreCreationHelper(fileIds) }
+                }
+            },
+            Temperature = 0.1f,
+            ResponseFormat = AssistantResponseFormat.Auto
+        };
+
+        AddToolsDemo(options);
+        return options;
+    }
+
+    private void AddToolsDemo(AssistantCreationOptions options)
+    {
+        options.Tools.Add(new FileSearchToolDefinition());
+        options.Tools.Add(new CodeInterpreterToolDefinition());
+        options.Tools.Add(CreateNavigateToAssetTool());
+        options.Tools.Add(CreateGetTimeSeriesTool());
     }
 
     private AssetEntity? FindAsset(GetTimeSeriesCommand command)
@@ -602,31 +992,9 @@ public class AssistantService : IAssistantService
     private string AppendPromptMetadata(string prompt) =>
         $"{prompt}\n---\nCurrent time: {DateTime.UtcNow:o}";
 
-    public async Task<AssistantThread> GetOrCreateThread(string? sessionId = null)
+    public async Task RemoveThread(string sessionId, CancellationToken cancellationToken)
     {
-        await _lock.WaitAsync();
-        try
-        {
-            sessionId ??= Guid.NewGuid().ToString();
-
-            if (!_threads.TryGetValue(sessionId, out var thread))
-            {
-                var result = await _assistantClient.CreateThreadAsync(new ThreadCreationOptions());
-                thread = result.Value;
-                _threads[sessionId] = thread;
-            }
-
-            return thread;
-        }
-        finally
-        {
-            _lock.Release();
-        }
-    }
-
-    public void RemoveThread(string sessionId)
-    {
-        _threads.Remove(sessionId);
+        await _assistantClient.DeleteThreadAsync(sessionId, cancellationToken: cancellationToken);
     }
 
     private void EnsureTimeSeriesData(int records, int intervalSeconds = 60)
@@ -729,9 +1097,9 @@ public class AssistantService : IAssistantService
         return Math.Round(value, 2);
     }
 
-    public async Task<int> GetTokenCount(string sessionId)
+    public async Task<int> GetTokenCount(string sessionId, CancellationToken cancellationToken = default)
     {
-        var thread = await GetOrCreateThread(sessionId);
+        var thread = await GetOrCreateThread(sessionId, cancellationToken);
         var tokenCount = _assistantClient.GetRuns(thread.Id).Select(r => r.Usage?.TotalTokenCount ?? 0).Sum();
         return tokenCount;
     }

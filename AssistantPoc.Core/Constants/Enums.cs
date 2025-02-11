@@ -1,6 +1,6 @@
 namespace AssistantPoc.Core.Constants;
 
-public enum ResponseStatus
+public enum AssistantResponseStatus
 {
     SUCCESS = 0,
     NEED_MORE_INFO = 1,

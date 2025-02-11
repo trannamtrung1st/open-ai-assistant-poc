@@ -9,6 +9,7 @@ builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "Assistant API", Version = "v1" });
 });
+builder.Services.AddMemoryCache();
 
 builder.Services.AddCors(options =>
 {
@@ -32,12 +33,8 @@ builder.Services.AddAssistantServices(options =>
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
-
+app.UseSwagger();
+app.UseSwaggerUI();
 app.UseCors("AllowAll");
 app.UseAuthorization();
 app.MapControllers();

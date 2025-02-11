@@ -6,25 +6,24 @@ namespace AssistantPoc.WebApi.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class ChatController : ControllerBase
+public class AssistantsController : ControllerBase
 {
     private readonly IAssistantService _assistantService;
-    private readonly ILogger<ChatController> _logger;
+    private readonly ILogger<AssistantsController> _logger;
 
-    public ChatController(
+    public AssistantsController(
         IAssistantService assistantService,
-        ILogger<ChatController> logger)
+        ILogger<AssistantsController> logger)
     {
         _assistantService = assistantService;
         _logger = logger;
     }
 
-    [HttpPost]
+    [HttpPost("messages")]
     public async Task<ActionResult<ChatResponse>> SendMessage([FromBody] ChatRequest request)
     {
         try
         {
-            request.SessionId ??= Guid.NewGuid().ToString();
             var thread = await _assistantService.GetOrCreateThread(request.SessionId);
             await _assistantService.AddPrompt(thread, request.Message);
 
@@ -45,6 +44,20 @@ public class ChatController : ControllerBase
             _logger.LogError(ex, "Error processing chat message");
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> CreateAssistant()
+    {
+        var assistantId = await _assistantService.CreateAssistant();
+        return Ok(new { assistantId });
+    }
+
+    [HttpDelete("{assistantId}")]
+    public async Task<IActionResult> DeleteAssistant(string assistantId)
+    {
+        await _assistantService.DeleteAssistant(assistantId);
+        return Ok();
     }
 
     [HttpGet("token-count")]

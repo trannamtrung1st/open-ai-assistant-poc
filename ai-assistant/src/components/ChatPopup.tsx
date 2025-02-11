@@ -9,7 +9,7 @@ import {
   SmileOutlined,
   FileImageOutlined
 } from '@ant-design/icons';
-import { chatService } from '../services/chatService';
+import { assistantService } from '../services/assistantService';
 import { Message } from '../types/chat';
 import { useNavigate } from 'react-router-dom';
 import { API_CONFIG } from '../config/api';
@@ -49,7 +49,7 @@ export default function ChatPopup() {
   }, [messages, sessionId]);
 
   const handleTokenCount = async (sessionId: string) => {
-    const tokenCount = await chatService.getTokenCount(sessionId);
+    const tokenCount = await assistantService.getTokenCount(sessionId);
     setTokenCount(tokenCount);
   };
 
@@ -69,7 +69,7 @@ export default function ChatPopup() {
     setIsTyping(true);
 
     try {
-      const response = await chatService.sendMessage(userMessage.content, sessionId);
+      const response = await assistantService.sendMessage(userMessage.content, sessionId);
       console.log(response);
       setSessionId(response.sessionId);
 

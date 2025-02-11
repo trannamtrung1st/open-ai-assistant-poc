@@ -15,9 +15,9 @@ interface ErrorResponse {
   error: string;
 }
 
-export const chatService = {
+export const assistantService = {
   getTokenCount: async (sessionId: string): Promise<number> => {
-    const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chat}/token-count?sessionId=${sessionId}`, {
+    const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.assistants}/token-count?sessionId=${sessionId}`, {
       method: 'GET'
     });
     const data = await response.json();
@@ -26,7 +26,7 @@ export const chatService = {
 
   sendMessage: async (message: string, sessionId?: string): Promise<ChatApiResponse> => {
     try {
-      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chat}`, {
+      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.assistants}/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

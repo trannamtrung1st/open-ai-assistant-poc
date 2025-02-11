@@ -221,7 +221,6 @@ Guidelines:
 **SwitchApplication**
 - Description: Switch to a different application
 - Parameters:
-  - `applicationName` (string, required): Name of the application to switch to
   - `application` (string, required): The application to navigate to
 
 **SearchAsset**
@@ -255,3 +254,4 @@ Guidelines:
   - `term` (string, required): The term to search for
 
 **Other functions**
+[TODO]

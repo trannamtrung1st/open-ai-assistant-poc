@@ -7,11 +7,11 @@ namespace AssistantPoc.WebApi.Controllers;
 [Route("api/[controller]")]
 public class FileController : ControllerBase
 {
-    private readonly IFileService _fileService;
+    private readonly IAssistantFileService _fileService;
     private readonly ILogger<FileController> _logger;
 
     public FileController(
-        IFileService fileService,
+        IAssistantFileService fileService,
         ILogger<FileController> logger)
     {
         _fileService = fileService;
