@@ -2,12 +2,12 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Avatar, Input, Button, Card, Typography, message } from 'antd';
-import { 
-  CloseOutlined, 
-  SendOutlined, 
-  PaperClipOutlined, 
-  SmileOutlined, 
-  FileImageOutlined 
+import {
+  CloseOutlined,
+  SendOutlined,
+  PaperClipOutlined,
+  SmileOutlined,
+  FileImageOutlined
 } from '@ant-design/icons';
 import { chatService } from '../services/chatService';
 import { Message } from '../types/chat';
@@ -47,7 +47,7 @@ export default function ChatPopup() {
       handleTokenCount(sessionId);
     }
   }, [messages, sessionId]);
-  
+
   const handleTokenCount = async (sessionId: string) => {
     const tokenCount = await chatService.getTokenCount(sessionId);
     setTokenCount(tokenCount);
@@ -70,6 +70,7 @@ export default function ChatPopup() {
 
     try {
       const response = await chatService.sendMessage(userMessage.content, sessionId);
+      console.log(response);
       setSessionId(response.sessionId);
 
       const aiMessage: Message = {
@@ -80,9 +81,10 @@ export default function ChatPopup() {
       };
 
       setMessages(prev => [...prev, aiMessage]);
-      
-      if (response.commandResult?.command === 'NavigateToAsset') {
-        const data = response.commandResult.data;
+
+      // [NOTE] Obsolete
+      if (response.commandResults && response.commandResults[0]?.command === 'NavigateToAsset') {
+        const data = response.commandResults[0].data;
         if (data.found) {
           navigate(`/assets/${data.assetId}`);
         }
@@ -105,7 +107,7 @@ export default function ChatPopup() {
 
   const formatMessageContent = (content: string) => {
     const imagePlaceholderRegex = /\{image:\/api\/file\/(.*?)\}/g;
-    
+
     // Replace image placeholders with markdown image syntax
     const markdownContent = content.replace(imagePlaceholderRegex, (_, fileId) => {
       const imageUrl = `${API_CONFIG.baseUrl}/api/file/${fileId}`;
@@ -115,25 +117,25 @@ export default function ChatPopup() {
     return (
       <ReactMarkdown
         components={{
-          img: ({node, ...props}) => (
+          img: ({ node, ...props }) => (
             <img
               {...props}
-              style={{ 
-                maxWidth: '100%', 
-                borderRadius: 4, 
-                margin: '8px 0' 
-              }} 
-            />
-          ),
-          p: ({node, ...props}) => (
-            <p 
-              {...props} 
-              style={{ 
-                margin: '0 0' 
+              style={{
+                maxWidth: '100%',
+                borderRadius: 4,
+                margin: '8px 0'
               }}
             />
           ),
-          code({node, inline, className, children, ...props}) {
+          p: ({ node, ...props }) => (
+            <p
+              {...props}
+              style={{
+                margin: '0 0'
+              }}
+            />
+          ),
+          code({ node, inline, className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || '');
             return !inline && match ? (
               <SyntaxHighlighter
@@ -168,8 +170,8 @@ export default function ChatPopup() {
             size="large"
             icon={<SmileOutlined />}
             onClick={() => setIsOpen(true)}
-            style={{ 
-              width: 52, 
+            style={{
+              width: 52,
               height: 52,
               display: 'flex',
               alignItems: 'center',
@@ -183,7 +185,7 @@ export default function ChatPopup() {
         {isOpen && (
           <div style={{ position: 'absolute', bottom: 0, right: 0 }}>
             <Card
-              style={{ 
+              style={{
                 width: 580,
                 boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
                 borderRadius: 8,
@@ -192,7 +194,7 @@ export default function ChatPopup() {
               bodyStyle={{ padding: 0 }}
             >
               {/* Header - reduced padding */}
-              <div style={{ 
+              <div style={{
                 padding: '12px 16px',
                 borderBottom: '1px solid #f0f0f0',
                 display: 'flex',
@@ -213,15 +215,15 @@ export default function ChatPopup() {
                     </Text>
                   </div>
                 </div>
-                <Button 
-                  type="text" 
-                  icon={<CloseOutlined />} 
+                <Button
+                  type="text"
+                  icon={<CloseOutlined />}
                   onClick={() => setIsOpen(false)}
                 />
               </div>
 
               {/* Messages area - reduced height and padding */}
-              <div style={{ 
+              <div style={{
                 height: 440,
                 overflowY: 'auto',
                 padding: 16,
@@ -230,7 +232,7 @@ export default function ChatPopup() {
                 {messages.map((message) => (
                   <div
                     key={message.id}
-                    style={{ 
+                    style={{
                       display: 'flex',
                       justifyContent: message.isUser ? 'flex-end' : 'flex-start',
                       marginBottom: 12
@@ -243,7 +245,7 @@ export default function ChatPopup() {
                         style={{ marginRight: 8, marginTop: 4 }}
                       />
                     )}
-                    <div style={{ 
+                    <div style={{
                       background: message.isUser ? '#1890ff' : '#e6f7ff',
                       color: message.isUser ? '#fff' : '#000',
                       padding: '8px 12px',
@@ -251,7 +253,7 @@ export default function ChatPopup() {
                       maxWidth: '75%',
                       wordBreak: 'break-word'
                     }}>
-                      <Text style={{ 
+                      <Text style={{
                         color: message.isUser ? '#fff' : 'inherit',
                         fontSize: 13
                       }}>
@@ -264,19 +266,19 @@ export default function ChatPopup() {
               </div>
 
               {/* Input area - reduced padding */}
-              <div style={{ 
+              <div style={{
                 padding: '12px 16px',
                 borderTop: '1px solid #f0f0f0',
                 background: '#fff'
               }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <Input 
+                  <Input
                     placeholder="Type a message..."
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyPress={handleKeyPress}
                     bordered={false}
-                    style={{ 
+                    style={{
                       flex: 1,
                       fontSize: 13
                     }}
@@ -285,9 +287,9 @@ export default function ChatPopup() {
                     <Button type="text" icon={<PaperClipOutlined />} />
                     <Button type="text" icon={<FileImageOutlined />} />
                     <Button type="text" icon={<SmileOutlined />} />
-                    <Button 
-                      type="primary" 
-                      icon={<SendOutlined />} 
+                    <Button
+                      type="primary"
+                      icon={<SendOutlined />}
                       onClick={handleSendMessage}
                       disabled={!inputValue.trim() || isLoading}
                       loading={isLoading}

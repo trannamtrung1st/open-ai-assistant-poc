@@ -10,6 +10,8 @@ using OpenAI.VectorStores;
 using Microsoft.Extensions.Options;
 using System.Text;
 using System.Globalization;
+using AssistantPoc.Core.Constants;
+using System.Data.SqlTypes;
 
 namespace AssistantPoc.Core.Services;
 
@@ -23,7 +25,6 @@ public class AssistantService : IAssistantService
     private readonly AssistantConfiguration _config;
     private readonly Dictionary<string, AssistantThread> _threads = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
-    private NavigateToAssetResponse? _lastNavigationCommand;
     private const string ImagePlaceholderFormat = "{{image:{0}}}";
     private readonly List<TimeSeriesData> _timeSeriesData = new();
     private readonly object _timeSeriesLock = new();
@@ -149,16 +150,15 @@ public class AssistantService : IAssistantService
         await _assistantClient.DeleteThreadAsync(thread.Value.Id);
     }
 
-    public async Task<(string Content, NavigateToAssetResponse? NavigateCommand)> RunThreadOnce(
+    public async Task<(string Content, IEnumerable<CommandResult>? Results)> RunThreadOnce(
         AssistantThread thread,
         string? assistantId,
         Func<Action<MessageStatusUpdate>>? onMessageCreated = null,
         Action<string>? onContent = null)
     {
-        _lastNavigationCommand = null;
         assistantId ??= _config.AssistantId;
         var responseBuilder = new StringBuilder();
-
+        IEnumerable<CommandResult>? commandResults = null;
         var streamingResult = _assistantClient.CreateRunStreamingAsync(
             thread.Id,
             assistantId,
@@ -167,14 +167,15 @@ public class AssistantService : IAssistantService
         do
         {
             streamingResult = await ReadStreamingResult(thread, streamingResult, onMessageCreated,
-                content =>
+                onCommandResult: (result) => commandResults = result,
+                onContent: content =>
                 {
                     responseBuilder.Append(content);
                     onContent?.Invoke(content);
                 });
         } while (streamingResult is not null);
 
-        return (responseBuilder.ToString(), _lastNavigationCommand);
+        return (responseBuilder.ToString(), commandResults);
     }
 
     private async Task<bool> GetConsolePrompt(AssistantThread thread)
@@ -200,6 +201,7 @@ public class AssistantService : IAssistantService
         AssistantThread thread,
         AsyncCollectionResult<StreamingUpdate> streamingResult,
         Func<Action<MessageStatusUpdate>>? onMessageCreated,
+        Action<IEnumerable<CommandResult>>? onCommandResult,
         Action<string>? onContent)
     {
         await foreach (StreamingUpdate update in streamingResult)
@@ -232,7 +234,7 @@ public class AssistantService : IAssistantService
                     return null;
 
                 case RequiredActionUpdate actionUpdate:
-                    return await HandleActionUpdate(thread, actionUpdate);
+                    return await HandleActionUpdate(thread, actionUpdate, onCommandResult);
             }
         }
         return null;
@@ -248,40 +250,210 @@ public class AssistantService : IAssistantService
 
     private async Task<AsyncCollectionResult<StreamingUpdate>> HandleActionUpdate(
         AssistantThread thread,
-        RequiredActionUpdate actionUpdate)
+        RequiredActionUpdate actionUpdate,
+        Action<IEnumerable<CommandResult>>? onCommandResult)
     {
-        string responseJson = await GetActionResponse(thread, actionUpdate);
+        var requiredActions = actionUpdate.Value.RequiredActions;
+        var toolOutputs = new List<ToolOutput>();
+        var commandResults = new List<CommandResult>();
+        var messageContext = new MessageContext();
 
+        foreach (var action in requiredActions)
+        {
+            (string responseJson, CommandResult? commandResult) = await GetActionResponse(thread, action, messageContext);
+            if (commandResult is not null)
+                commandResults.Add(commandResult);
+            toolOutputs.Add(new ToolOutput(action.ToolCallId, responseJson));
+        }
+
+        onCommandResult?.Invoke(commandResults);
         return _assistantClient.SubmitToolOutputsToRunStreamingAsync(
             threadId: thread.Id,
             runId: actionUpdate.Value.Id,
-            toolOutputs: [new ToolOutput(actionUpdate.ToolCallId, responseJson)]);
+            toolOutputs: toolOutputs);
     }
 
-    private async Task<string> GetActionResponse(AssistantThread thread, RequiredActionUpdate actionUpdate)
+    private async Task<(string Json, CommandResult? Result)> GetActionResponse(AssistantThread thread, RequiredAction action, MessageContext messageContext)
     {
-        return actionUpdate.FunctionName switch
+        object? response = action.FunctionName switch
         {
-            nameof(NavigateToAsset) => await HandleNavigateToAsset(actionUpdate),
-            nameof(GetTimeSeries) => await HandleGetTimeSeries(thread, actionUpdate),
-            _ => "{}"
+            nameof(NavigateToPage) => await HandleNavigateToPage(action, messageContext),
+            nameof(SearchDevice) => await HandleSearchDevice(action, messageContext),
+            nameof(SearchProject) => await HandleSearchProject(action, messageContext),
+            nameof(SearchSubscription) => await HandleSearchSubscription(action, messageContext),
+
+            // [NOTE] Obsolete
+#pragma warning disable CS0612 // Type or member is obsolete
+            nameof(NavigateToAsset) => await HandleNavigateToAsset(action),
+            nameof(GetTimeSeries) => await HandleGetTimeSeries(thread, action),
+#pragma warning restore CS0612 // Type or member is obsolete
+            _ => null
         };
+
+        return (JsonConvert.SerializeObject(response), response != null ? new CommandResult
+        {
+            Command = action.FunctionName,
+            Data = response
+        } : null);
     }
 
-    private async Task<string> HandleNavigateToAsset(RequiredActionUpdate actionUpdate)
+    private async Task<NavigateToPageResponse> HandleNavigateToPage(RequiredAction actionUpdate, MessageContext messageContext)
+    {
+        var command = JsonConvert.DeserializeObject<NavigateToPageCommand>(actionUpdate.FunctionArguments);
+        var response = await NavigateToPage(command ?? throw new ArgumentNullException(nameof(command)), messageContext);
+        return response;
+    }
+
+    private async Task<SearchDeviceResponse> HandleSearchDevice(RequiredAction actionUpdate, MessageContext messageContext)
+    {
+        var command = JsonConvert.DeserializeObject<SearchDeviceCommand>(actionUpdate.FunctionArguments);
+        var response = await SearchDevice(command ?? throw new ArgumentNullException(nameof(command)), messageContext);
+        return response;
+    }
+
+    private async Task<SearchProjectResponse> HandleSearchProject(RequiredAction actionUpdate, MessageContext messageContext)
+    {
+        var command = JsonConvert.DeserializeObject<SearchProjectCommand>(actionUpdate.FunctionArguments);
+        var response = await SearchProject(command ?? throw new ArgumentNullException(nameof(command)), messageContext);
+        return response;
+    }
+
+    private async Task<SearchSubscriptionResponse> HandleSearchSubscription(RequiredAction actionUpdate, MessageContext messageContext)
+    {
+        var command = JsonConvert.DeserializeObject<SearchSubscriptionCommand>(actionUpdate.FunctionArguments);
+        var response = await SearchSubscription(command ?? throw new ArgumentNullException(nameof(command)), messageContext);
+        return response;
+    }
+
+    [Obsolete]
+    private async Task<NavigateToAssetResponse> HandleNavigateToAsset(RequiredAction actionUpdate)
     {
         var command = JsonConvert.DeserializeObject<NavigateToAssetCommand>(actionUpdate.FunctionArguments);
         var response = await NavigateToAsset(command ?? throw new ArgumentNullException(nameof(command)));
-        return JsonConvert.SerializeObject(response);
+        return response;
     }
 
-    private async Task<string> HandleGetTimeSeries(AssistantThread thread, RequiredActionUpdate actionUpdate)
+    [Obsolete]
+    private async Task<GetTimeSeriesResponse> HandleGetTimeSeries(AssistantThread thread, RequiredAction actionUpdate)
     {
         var command = JsonConvert.DeserializeObject<GetTimeSeriesCommand>(actionUpdate.FunctionArguments);
         var response = await GetTimeSeries(thread, command ?? throw new ArgumentNullException(nameof(command)));
-        return JsonConvert.SerializeObject(response);
+        return response;
     }
 
+    private async Task<NavigateToPageResponse> NavigateToPage(NavigateToPageCommand command, MessageContext messageContext)
+    {
+        await Task.CompletedTask;
+        var missingParams = new List<string>();
+        var subscriptionId = Guid.TryParse(command.SubscriptionId, out var subId)
+            ? subId : messageContext.SubscriptionId;
+        var projectId = Guid.TryParse(command.ProjectId, out var projId)
+            ? projId : messageContext.ProjectId;
+
+        if (subscriptionId is null) missingParams.Add(nameof(command.SubscriptionId));
+        if (projectId is null) missingParams.Add(nameof(command.ProjectId));
+
+        if (missingParams.Count != 0)
+        {
+            return new NavigateToPageResponse
+            {
+                Status = ResponseStatus.NEED_MORE_INFO,
+                ForParams = missingParams
+            };
+        }
+
+        return new NavigateToPageResponse()
+        {
+            Status = ResponseStatus.SUCCESS,
+            SubscriptionId = subscriptionId,
+            ProjectId = projectId,
+            Application = command.Application,
+            Page = command.Page,
+            Params = JsonConvert.DeserializeObject<Dictionary<string, string>>(command.Params ?? "{}")
+        };
+    }
+
+    private async Task<SearchProjectResponse> SearchProject(SearchProjectCommand command, MessageContext messageContext)
+    {
+        await Task.CompletedTask;
+
+        var projectEntities = DataStore.Projects;
+
+        if (!string.IsNullOrWhiteSpace(command.Term))
+        {
+            projectEntities = projectEntities
+                .Where(p => p.Name.Contains(command.Term, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        if (projectEntities.Count == 1)
+            messageContext.ProjectId = projectEntities[0].Id;
+
+        return new SearchProjectResponse
+        {
+            Data = projectEntities,
+            Status = ResponseStatus.SUCCESS
+        };
+    }
+
+    private async Task<SearchSubscriptionResponse> SearchSubscription(SearchSubscriptionCommand command, MessageContext messageContext)
+    {
+        await Task.CompletedTask;
+
+        var subscriptionEntities = DataStore.Subscriptions;
+
+        if (!string.IsNullOrWhiteSpace(command.Term))
+        {
+            subscriptionEntities = subscriptionEntities
+                .Where(s => s.Name.Contains(command.Term, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        if (subscriptionEntities.Count == 1)
+            messageContext.SubscriptionId = subscriptionEntities[0].Id;
+
+        return new SearchSubscriptionResponse
+        {
+            Data = subscriptionEntities,
+            Status = ResponseStatus.SUCCESS
+        };
+    }
+
+    private async Task<SearchDeviceResponse> SearchDevice(SearchDeviceCommand command, MessageContext messageContext)
+    {
+        await Task.CompletedTask;
+        var projectId = Guid.TryParse(command.ProjectId, out var projId)
+            ? projId : messageContext.ProjectId;
+        List<DeviceEntity> deviceEntities = DataStore.Devices;
+        var missingParams = new List<string>();
+
+        if (projectId is null) missingParams.Add(nameof(command.ProjectId));
+
+        if (missingParams.Count != 0)
+        {
+            return new SearchDeviceResponse
+            {
+                Status = ResponseStatus.NEED_MORE_INFO,
+                ForParams = missingParams
+            };
+        }
+
+        if (!string.IsNullOrWhiteSpace(command.Term))
+        {
+            deviceEntities = deviceEntities
+                .Where(d => d.Name.Contains(command.Term, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        var response = new SearchDeviceResponse
+        {
+            Data = deviceEntities,
+            Status = ResponseStatus.SUCCESS
+        };
+        return response;
+    }
+
+    [Obsolete]
     private async Task<NavigateToAssetResponse> NavigateToAsset(NavigateToAssetCommand command)
     {
         await Task.CompletedTask;
@@ -307,10 +479,10 @@ public class AssistantService : IAssistantService
             AssetId = assetEntity?.Id,
             Found = assetEntity is not null
         };
-        _lastNavigationCommand = response;
         return response;
     }
 
+    [Obsolete]
     private async Task<GetTimeSeriesResponse> GetTimeSeries(AssistantThread thread, GetTimeSeriesCommand command)
     {
         await Task.CompletedTask;
@@ -560,7 +732,7 @@ public class AssistantService : IAssistantService
     public async Task<int> GetTokenCount(string sessionId)
     {
         var thread = await GetOrCreateThread(sessionId);
-        var tokenCount = _assistantClient.GetRuns(thread.Id).Select(r => r.Usage.TotalTokenCount).Sum();
+        var tokenCount = _assistantClient.GetRuns(thread.Id).Select(r => r.Usage?.TotalTokenCount ?? 0).Sum();
         return tokenCount;
     }
 }

@@ -28,23 +28,15 @@ public class ChatController : ControllerBase
             var thread = await _assistantService.GetOrCreateThread(request.SessionId);
             await _assistantService.AddPrompt(thread, request.Message);
 
-            var (content, navigateCommand) = await _assistantService.RunThreadOnce(thread, assistantId: null,
+            var (content, commandResults) = await _assistantService.RunThreadOnce(thread, assistantId: null,
                 () => _ => { });
 
             var response = new ChatResponse
             {
                 Content = content,
-                SessionId = request.SessionId ?? thread.Id
+                SessionId = request.SessionId ?? thread.Id,
+                CommandResults = commandResults
             };
-
-            if (navigateCommand != null)
-            {
-                response.CommandResult = new CommandResult
-                {
-                    Command = navigateCommand.Command,
-                    Data = navigateCommand
-                };
-            }
 
             return Ok(response);
         }

@@ -8,7 +8,7 @@ interface CommandResult {
 interface ChatApiResponse {
   content: string;
   sessionId: string;
-  commandResult?: CommandResult;
+  commandResults?: CommandResult[];
 }
 
 interface ErrorResponse {
@@ -23,7 +23,7 @@ export const chatService = {
     const data = await response.json();
     return data.tokenCount;
   },
-  
+
   sendMessage: async (message: string, sessionId?: string): Promise<ChatApiResponse> => {
     try {
       const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chat}`, {
@@ -39,7 +39,7 @@ export const chatService = {
       });
 
       const data = await response.json();
-      
+
       if (!response.ok) {
         const errorMessage = (data as ErrorResponse).error || `HTTP error! status: ${response.status}`;
         throw new Error(errorMessage);

@@ -7,7 +7,7 @@ public interface IAssistantService
 {
     Task CreateAssistant();
     Task RunConsoleThread(string? assistantId = null);
-    Task<(string Content, NavigateToAssetResponse? NavigateCommand)> RunThreadOnce(
+    Task<(string Content, IEnumerable<CommandResult>? Results)> RunThreadOnce(
         AssistantThread thread,
         string? assistantId,
         Func<Action<MessageStatusUpdate>> onMessageCreated,
